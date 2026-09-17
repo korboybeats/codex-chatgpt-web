@@ -1221,8 +1221,11 @@ class BrowserHost {
       for (const [id, upload] of uploads) {
         if (upload.fileId === data.fileId || uploads.size >= 4) uploads.delete(id);
       }
-      uploads.set(details.id, { ...data, requestId: details.id, contentsId: contents.id,
-        frame: details.frame, traceId: tab.traceId, helperPid: tab.helperPid, accepted: false });
+      const upload = { ...data, requestId: details.id, contentsId: contents.id,
+        frame: details.frame, traceId: tab.traceId, helperPid: tab.helperPid, accepted: false, promptVerified: false };
+      uploads.set(details.id, upload);
+      // Electron's blob handle expires after this request. Retain only exact-match evidence.
+      void this.verifyManualPromptBlob(tab, upload, Buffer.byteLength(tab.prompt), tab.promptDigest);
       return;
     }
     // Any later request supersedes the earlier candidate, including unrelated text or regeneration.
@@ -1237,31 +1240,37 @@ class BrowserHost {
         reason: fileId ? "upload-not-observed" : "prompt-not-matched" });
       return;
     }
-    const evidence = tab.manualSubmission = {
+    tab.manualSubmission = {
       requestId: details.id, traceId: tab.traceId, helperPid: tab.helperPid,
       contentsId: contents.id, frame: details.frame, accepted: false, promptVerified, upload,
     };
     this.logger.info("browser.manual_submission_observed", { tabId: tab.id, traceId: tab.traceId });
-    if (upload) void this.verifyManualPromptBlob(tab, evidence, expectedBytes, tab.promptDigest);
   }
 
-  async verifyManualPromptBlob(tab, evidence, expectedBytes, digest) {
+  async verifyManualPromptBlob(tab, upload, expectedBytes, digest) {
+    const current = () => this.manualAutoSentEligible(tab)
+      && tab.manualPromptUploads?.get(upload.requestId) === upload
+      && tab.traceId === upload.traceId && tab.helperPid === upload.helperPid
+      && tab.view.webContents.id === upload.contentsId && tab.view.webContents.mainFrame === upload.frame;
+    const discard = reason => {
+      if (!current()) return;
+      tab.manualPromptUploads.delete(upload.requestId);
+      if (tab.manualSubmission?.upload === upload) tab.manualSubmission = null;
+      this.logger.info("browser.manual_submission_unverified", { tabId: tab.id, traceId: tab.traceId, reason });
+    };
     try {
-      const bytes = await tab.view.webContents.session.getBlobData(evidence.upload.blobUUID);
-      if (!this.manualAutoSentEligible(tab) || tab.manualSubmission !== evidence) return;
+      if (expectedBytes < 1 || expectedBytes > 8 * 1024 * 1024) return;
+      const bytes = await tab.view.webContents.session.getBlobData(upload.blobUUID);
+      if (!current()) return;
       if (!Buffer.isBuffer(bytes) || bytes.length !== expectedBytes
         || createHash("sha256").update(bytes).digest("hex") !== digest) {
-        tab.manualSubmission = null;
-        this.logger.info("browser.manual_submission_unverified", { tabId: tab.id, traceId: tab.traceId, reason: "prompt-not-matched" });
+        discard("prompt-not-matched");
         return;
       }
-      evidence.promptVerified = true;
+      upload.promptVerified = true;
       this.tryConfirmManualSubmission(tab);
     } catch {
-      if (tab.manualSubmission === evidence) {
-        tab.manualSubmission = null;
-        this.logger.info("browser.manual_submission_unverified", { tabId: tab.id, traceId: tab.traceId, reason: "blob-unavailable" });
-      }
+      discard("blob-unavailable");
     }
   }
 
@@ -1300,7 +1309,7 @@ class BrowserHost {
 
   tryConfirmManualSubmission(tab) {
     const evidence = tab.manualSubmission;
-    if (!this.manualAutoSentEligible(tab) || !tab.manualConnectorStarted || !evidence?.accepted || !evidence.promptVerified
+    if (!this.manualAutoSentEligible(tab) || !tab.manualConnectorStarted || !evidence?.accepted || (!evidence.promptVerified && !evidence.upload?.promptVerified)
       || evidence.traceId !== tab.traceId || evidence.helperPid !== tab.helperPid
       || evidence.contentsId !== tab.view.webContents.id
       || evidence.frame !== tab.view.webContents.mainFrame) return;

@@ -3459,7 +3459,8 @@ function pastedFileFixture(t) {
 for (const uploadFirst of [false, true]) test(`large paste requires exact native blob, accepted upload, submission and connector (${uploadFirst})`, async t => {
   const f = pastedFileFixture(t);
   f.send(f.upload);
-  assert.equal(f.reads(), 0); // Uploading/pasting alone never reads a blob or confirms Sent.
+  assert.equal(f.reads(), 1); // Read while the native handle is alive; upload alone never confirms Sent.
+  assert.equal(f.tab.manualState, 'awaiting-user');
   if (uploadFirst) f.uploadResponse();
   f.send(f.submission());
   assert.equal(f.reads(), 1);
@@ -3507,3 +3508,32 @@ for (const scenario of ['wrong-text', 'wrong-id', 'wrong-size', 'not-big-paste',
     assert.ok(!JSON.stringify(f.logs).includes('PRIVATE_BLOB_ERROR'));
   });
 }
+
+
+test('verified large paste and connector start cannot confirm before actual submission', async t => {
+  const f = pastedFileFixture(t);
+  f.send(f.upload);
+  f.resolveBlob(); await Promise.resolve();
+  f.uploadResponse(); f.start();
+  assert.equal(f.tab.manualState, 'awaiting-user');
+  assert.equal(f.tab.manualPromptUploads.get(20).promptVerified, true);
+  f.send(f.submission()); f.submissionResponse();
+  assert.equal(f.tab.manualState, 'sent');
+  assert.equal(f.reads(), 1); // Never reopen an expired blob at submission.
+});
+
+
+test('native blob is opened before request callback releases its temporary handle', async t => {
+  const f = pastedFileFixture(t);
+  let released = false;
+  f.contents.session.getBlobData = () => {
+    assert.equal(released, false);
+    return Promise.resolve(Buffer.from(f.prompt));
+  };
+  f.listeners.onBeforeRequest(f.upload, result => { assert.deepEqual(result, {}); released = true; });
+  assert.equal(released, true);
+  await Promise.resolve();
+  assert.equal(f.tab.manualState, 'awaiting-user');
+  f.uploadResponse(); f.send(f.submission()); f.submissionResponse(); f.start();
+  assert.equal(f.tab.manualState, 'sent');
+});

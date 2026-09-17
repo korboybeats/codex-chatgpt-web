@@ -17,8 +17,9 @@ Auto Sent requires all of these facts, in either event order:
    For ChatGPT's large-paste text-file format, the message must instead reference exactly one
    `is_big_paste` text attachment with the expected UTF-8 byte count, with no other message text
    except the connector mention. Its file ID must match a native upload observed in this same turn.
-   Only then does Electron's native `session.getBlobData` read that upload's blob in memory. Both
-   its actual byte count and SHA-256 must match the prepared prompt. The upload must also receive
+   Electron's native `session.getBlobData` fingerprints the upload in memory while its temporary
+   handle is valid. Both its actual byte count and SHA-256 must match the prepared prompt; only
+   an exact-match boolean and native identity are retained. The upload must also receive
    an uncached HTTP 200/201. Attachment metadata alone cannot confirm anything.
 2. `onResponseStarted` for that exact native request reports an uncached HTTP 200 event stream.
    This is transport evidence only; a successful HTTP status is insufficient on its own.
@@ -41,10 +42,13 @@ observed, plus PUTs to `files.oaiusercontent.com` or OpenAI's regional
 `sdmntpr<region>.oaiusercontent.com` storage hosts over HTTPS. Other upload origins are rejected.
 JSON parsing is bounded to 8 MiB;
 no disk-backed upload files are opened. At most four upload candidates are retained per turn.
-The blob API returns a whole buffer: it is called only for a submitted big-paste attachment whose
-declared size equals the bounded prepared prompt, and its returned length is checked again. No
-upload contents are read merely because they were pasted, selected or uploaded. Stored evidence
-contains native identity, opaque upload identifiers and acceptance metadata, never uploaded bytes,
+The blob API returns a whole buffer and its handle expires before submission. For a supported
+single-blob upload from the active manual turn, the native bytes are therefore read transiently at
+upload time, compared to the prepared prompt's byte count and digest, and discarded. This may inspect
+an unrelated upload in that same owned tab; no content is retained, logged or transmitted. Uploads
+from other tabs and disk-backed uploads are never opened. No upload can confirm Sent without the
+later matching big-paste message and all other signals. Stored evidence contains native identity,
+opaque upload identifiers and acceptance/match metadata, never uploaded bytes,
 request bodies or headers. Logs contain event names, local tab/trace IDs and fixed failure reasons.
 
 ## Failure behavior
@@ -60,7 +64,7 @@ request bodies or headers. Logs contain event names, local tab/trace IDs and fix
 - Upload URLs encode the file ID as one complete UUID path segment; attachment metadata uses the
   same 32 hexadecimal digits prefixed by `file_`. Ambiguous paths, unknown IDs, failed uploads,
   unavailable blobs, replaced files and edited pasted text fail closed. No filename, timestamp or
-  sequence-only correlation is used. Async blob results recheck the same live turn and submission.
+  sequence-only correlation is used. Async blob results recheck the same live turn, frame and upload identity.
 - Main-document navigation clears evidence. Existing retained-conversation navigation rules remain
   authoritative. Renderer failure, cancellation, timeout, completion and tab removal clear evidence.
   Launcher/browser restart never restores evidence from disk.

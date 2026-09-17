@@ -72,8 +72,8 @@ function matchesManualPrompt(details, promptDigest) {
   return message.text.startsWith(mention) && matches(message.text.slice(mention.length));
 }
 
-// No bytes are read on paste/upload. Only the actual submitted big-paste attachment
-// can request a blob check, and its claimed size must equal the prepared prompt size.
+// Only an actual submitted big-paste attachment can use previously verified upload
+// evidence, and its claimed size must equal the prepared prompt size.
 function pastedPromptFile(details, expectedBytes) {
   const message = submissionMessage(details);
   if (!message || !/^(?:\s*|\s*@Codex Zero Risk\s*)$/.test(message.text)
