@@ -3308,10 +3308,10 @@ function autoSentFixture(t, { enabled = true, compaction = false } = {}) {
   return { fixture, tab, contents, prompt, logs, lease, listeners, body, request, response, send, start };
 }
 
-for (const connectorFirst of [false, true]) test(`Auto Sent requires exact native submission and connector (connector first: ${connectorFirst})`, async t => {
+for (const mention of ['', '@Codex Zero Risk ']) for (const connectorFirst of [false, true]) test(`Auto Sent requires exact native submission and connector (mention: ${!!mention}, connector first: ${connectorFirst})`, async t => {
   const f = autoSentFixture(t);
   const waiting = f.fixture.waitManualSent(f.tab.traceId, process.pid);
-  f.send();
+  f.send(f.request(mention + f.prompt));
   assert.equal(f.tab.manualState, 'awaiting-user');
   if (connectorFirst) f.start();
   f.listeners.onResponseStarted(f.response());

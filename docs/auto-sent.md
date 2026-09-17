@@ -11,7 +11,9 @@ Auto Sent requires all of these facts, in either event order:
 1. Electron `session.webRequest.onBeforeRequest` observes a POST to an exact supported ChatGPT
    conversation endpoint from the main frame of the manual turn's owned WebContents. Its JSON has
    `action: next`, one user message and exactly one text part whose SHA-256 equals the already
-   prepared prompt digest. Multimodal messages may also contain uploaded image references.
+   prepared prompt digest. ChatGPT's exact leading `@Codex Zero Risk ` connector-chip prefix is
+   allowed; the remaining prompt must match without trimming or other normalization. Multimodal
+   messages may also contain uploaded image references.
 2. `onResponseStarted` for that exact native request reports an uncached HTTP 200 event stream.
    This is transport evidence only; a successful HTTP status is insufficient on its own.
 3. The existing broker receives `codex_turn_start` for that turn's opaque request ID. A new observer,

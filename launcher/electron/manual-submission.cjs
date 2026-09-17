@@ -29,7 +29,12 @@ function matchesManualPrompt(details, promptDigest) {
     if (content.parts.some(part => typeof part !== "string"
       && !(content.content_type === "multimodal_text" && part?.content_type === "image_asset_pointer"
         && typeof part.asset_pointer === "string" && part.asset_pointer.startsWith("file-service://")))) return false;
-    return createHash("sha256").update(text[0], "utf8").digest("hex") === promptDigest;
+    const matches = value => createHash("sha256").update(value, "utf8").digest("hex") === promptDigest;
+    if (matches(text[0])) return true;
+    // ChatGPT serializes its selected Zero Risk connector chip as this leading mention.
+    // Remove only that exact transport prefix; never trim or normalize prompt text.
+    const mention = "@Codex Zero Risk ";
+    return text[0].startsWith(mention) && matches(text[0].slice(mention.length));
   } catch {
     return false;
   }

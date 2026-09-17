@@ -8,6 +8,24 @@ const digest = createHash('sha256').update(prompt).digest('hex');
 const body = () => ({ action: 'next', messages: [{ id: 'new-message', author: { role: 'user' }, content: { content_type: 'text', parts: [prompt] } }] });
 const request = value => ({ method: 'POST', resourceType: 'xhr', url: 'https://chatgpt.com/backend-api/f/conversation', uploadData: [{ bytes: Buffer.from(JSON.stringify(value)) }] });
 
+test('the selected Zero Risk connector mention preserves exact prompt matching', () => {
+  const check = text => {
+    const value = body(); value.messages[0].content.parts = [text];
+    return matchesManualPrompt(request(value), digest);
+  };
+  assert.equal(check('@Codex Zero Risk ' + prompt), true);
+  for (const text of [
+    '@Other connector ' + prompt,
+    '@Codex Zero Risk  ' + prompt,
+    '@Codex Zero Risk\n' + prompt,
+    '@Codex Zero Risk @Codex Zero Risk ' + prompt,
+    '@Codex Zero Risk ' + prompt + '\n',
+    '@Codex Zero Risk ' + prompt + ' unrelated text',
+    'unrelated text @Codex Zero Risk ' + prompt,
+    prompt + ' @Codex Zero Risk ',
+  ]) assert.equal(check(text), false);
+});
+
 test('strict exact-text matching accepts chunked UTF-8 without changing whitespace', () => {
   const req = request(body());
   const bytes = req.uploadData[0].bytes;
