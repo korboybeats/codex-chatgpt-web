@@ -46,7 +46,7 @@ function fixture(t, options = {}) {
   const commands = [];
   let attached = options.alreadyAttached || false, detaches = 0, callbacks = 0, enabled = true;
   const frame = {};
-  const body = '{"private":"exact request bytes"}';
+  const body = JSON.stringify({ messages: [{ id: "user-message-1" }], private: "exact request bytes" });
   const owned = { requestDigest: createHash('sha256').update(body).digest('hex'), frame };
   let evidence = owned;
   const contents = { debugger: dbg, mainFrame: frame };
@@ -153,4 +153,61 @@ test('response finish during streaming still processes buffered acknowledgement'
   f.emit('Network.loadingFinished', { requestId: 'request-1' });
   f.resolve(ack); await tick();
   assert.equal(f.callbacks(), 1);
+});
+
+
+const proSnapshot = { p: '', o: 'add', v: {
+  conversation_id: token.conversation_id, error: null, error_code: null,
+  message: { id: 'system-message', author: { role: 'system' }, status: 'finished_successfully',
+    metadata: { parent_id: 'user-message-1' }, content: { parts: ['PRIVATE_SYSTEM_CONTENT'] } },
+} };
+const proAck = event(token) + event(proSnapshot);
+
+test('Pro accepted snapshot confirms only the exact submitted message across chunk boundaries', () => {
+  for (let split = 0; split <= Buffer.byteLength(proAck); split++) {
+    const parser = new SubmissionAckParser('user-message-1');
+    const bytes = Buffer.from(proAck);
+    parser.push(bytes.subarray(0, split));
+    assert.equal(parser.push(bytes.subarray(split)), true);
+    assert.equal(parser.messageId, null);
+    assert.ok(!JSON.stringify(parser).includes('PRIVATE_SYSTEM_CONTENT'));
+  }
+});
+
+for (const scenario of ['wrong-parent', 'missing-parent', 'wrong-conversation', 'error', 'error-code', 'failed-status', 'wrong-role', 'nested-patch', 'wrong-operation', 'no-request-id', 'no-token']) {
+  test(`Pro acknowledgement fails closed: ${scenario}`, () => {
+    const snapshot = structuredClone(proSnapshot);
+    const m = snapshot.v.message;
+    if (scenario === 'wrong-parent') m.metadata.parent_id = 'previous-turn';
+    if (scenario === 'missing-parent') delete m.metadata.parent_id;
+    if (scenario === 'wrong-conversation') snapshot.v.conversation_id = 'other';
+    if (scenario === 'error') snapshot.v.error = 'PRIVATE_ERROR';
+    if (scenario === 'error-code') snapshot.v.error_code = 429;
+    if (scenario === 'failed-status') m.status = 'failed';
+    if (scenario === 'wrong-role') m.author.role = 'assistant';
+    if (scenario === 'nested-patch') snapshot.p = '/message';
+    if (scenario === 'wrong-operation') snapshot.o = 'replace';
+    const parser = new SubmissionAckParser(scenario === 'no-request-id' ? undefined : 'user-message-1');
+    assert.equal(parser.push(Buffer.from((scenario === 'no-token' ? '' : event(token)) + event(snapshot))), false);
+  });
+}
+
+test('native Pro observer correlates snapshot parent to the hashed outgoing request', async t => {
+  const f = fixture(t, { data: proAck });
+  f.request(); f.response(); await tick();
+  assert.equal(f.callbacks(), 1);
+  assert.equal(f.detaches(), 1);
+});
+
+test('unavailable observation reports fixed reasons without private exception contents', async t => {
+  const dbg = new EventEmitter();
+  dbg.isAttached = () => false;
+  dbg.attach = () => { throw Error('PRIVATE_EXCEPTION'); };
+  const reasons = [];
+  const observer = observeSubmissionAck({ debugger: dbg }, {
+    eligible: () => true, evidence: () => null, acknowledged: () => assert.fail('unexpected acknowledgement'),
+    unavailable: reason => reasons.push(reason),
+  });
+  t.after(() => observer.dispose());
+  assert.deepEqual(reasons, ['observer-error']);
 });

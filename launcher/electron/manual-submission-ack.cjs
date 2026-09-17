@@ -8,7 +8,8 @@ const opaqueId = value => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.
 
 // Only the initial server handoff is needed. Never retain tokens or response content.
 class SubmissionAckParser {
-  constructor() {
+  constructor(messageId) {
+    this.messageId = opaqueId(messageId) ? messageId : null;
     this.decoder = new StringDecoder("utf8");
     this.buffer = "";
     this.bytes = 0;
@@ -42,6 +43,17 @@ class SubmissionAckParser {
       } else if (value.type === "stream_handoff") {
         return this.finish(!!this.conversationId && value.conversation_id === this.conversationId
           && opaqueId(value.turn_exchange_id));
+      } else if (value.p === "" && value.o === "add" && value.v?.message) {
+        // Pro streams an accepted conversation snapshot instead of handing off.
+        // Its successful system message must be a direct child of the exact
+        // submitted user message, in the already acknowledged conversation.
+        const snapshot = value.v;
+        const message = snapshot.message;
+        return this.finish(!!this.messageId && !!this.conversationId
+          && snapshot.conversation_id === this.conversationId
+          && snapshot.error == null && snapshot.error_code == null
+          && message.author?.role === "system" && message.status === "finished_successfully"
+          && message.metadata?.parent_id === this.messageId);
       } else {
         // Unknown transports use the existing connector/manual fallback.
         return this.finish(false);
@@ -52,6 +64,7 @@ class SubmissionAckParser {
 
   finish(result) {
     this.result = result;
+    this.messageId = null;
     this.buffer = "";
     this.conversationId = null;
     this.decoder = null;
@@ -61,10 +74,10 @@ class SubmissionAckParser {
 
 // A read-only, short-lived native Network observer. No page scripts, input, Fetch
 // interception, request rewriting or response buffering after acknowledgement.
-function observeSubmissionAck(contents, { eligible, evidence, acknowledged }) {
+function observeSubmissionAck(contents, { eligible, evidence, acknowledged, unavailable = () => {} }) {
   const dbg = contents?.debugger;
   let attached = false, disposed = false, request = null;
-  const dispose = () => {
+  const dispose = reason => {
     if (disposed) return;
     disposed = true;
     request = null;
@@ -74,24 +87,26 @@ function observeSubmissionAck(contents, { eligible, evidence, acknowledged }) {
       attached = false;
       try { dbg.detach(); } catch { /* The renderer may already be gone. */ }
     }
+    if (typeof reason === "string") { try { unavailable(reason); } catch {} }
   };
-  const onDetach = () => { attached = false; dispose(); };
+  const onDetach = () => { attached = false; dispose("debugger-detached"); };
   const current = record => !disposed && eligible() && request === record
     && evidence() === record.evidence && contents.mainFrame === record.evidence.frame;
   const feed = (record, encoded) => {
     if (!current(record)) return dispose();
-    if (typeof encoded !== "string" || encoded.length > MAX_ACK_BYTES * 2) return dispose();
+    if (typeof encoded !== "string" || encoded.length > MAX_ACK_BYTES * 2) return dispose("response-limit");
     const result = record.parser.push(Buffer.from(encoded, "base64"));
     if (result !== null) {
       const owned = record.evidence;
-      dispose();
+      dispose(result ? undefined : "unsupported-response");
       if (result) acknowledged(owned);
     }
   };
   const stream = async record => {
     try {
       const tree = await dbg.sendCommand("Page.getFrameTree");
-      if (!current(record) || tree?.frameTree?.frame?.id !== record.frameId) return dispose();
+      if (!current(record)) return dispose();
+      if (tree?.frameTree?.frame?.id !== record.frameId) return dispose("frame-mismatch");
       record.pending = true;
       const result = await dbg.sendCommand("Network.streamResourceContent", { requestId: record.id });
       if (!current(record)) return dispose();
@@ -102,8 +117,8 @@ function observeSubmissionAck(contents, { eligible, evidence, acknowledged }) {
         feed(record, chunk);
       }
       record.queued = [];
-      if (record.finished) dispose();
-    } catch { dispose(); }
+      if (record.finished) dispose("no-acknowledgement");
+    } catch { dispose("observer-error"); }
   };
   const onMessage = (_event, method, params, sessionId) => {
     try {
@@ -120,7 +135,8 @@ function observeSubmissionAck(contents, { eligible, evidence, acknowledged }) {
           || typeof params.requestId !== "string" || !params.requestId
           || Buffer.byteLength(body) > MAX_REQUEST_BYTES) return;
         request = { id: params.requestId, frameId: params.frameId,
-          digest: createHash("sha256").update(body).digest("hex") };
+          digest: createHash("sha256").update(body).digest("hex"),
+          messageId: JSON.parse(body).messages?.[0]?.id };
       }
       const record = request;
       if (!record || params.requestId !== record.id) return;
@@ -130,9 +146,9 @@ function observeSubmissionAck(contents, { eligible, evidence, acknowledged }) {
         const response = params.response;
         if (!owned || record.digest !== owned.requestDigest || response?.status !== 200
           || response.mimeType !== "text/event-stream" || response.fromDiskCache
-          || response.fromServiceWorker || response.fromPrefetchCache) return dispose();
+          || response.fromServiceWorker || response.fromPrefetchCache) return dispose("response-not-matched");
         record.evidence = owned;
-        record.parser = new SubmissionAckParser();
+        record.parser = new SubmissionAckParser(record.messageId);
         record.queued = [];
         record.queuedBytes = 0;
         record.pending = true;
@@ -140,26 +156,26 @@ function observeSubmissionAck(contents, { eligible, evidence, acknowledged }) {
       } else if (method === "Network.dataReceived" && record.parser && params.data) {
         if (record.pending) {
           record.queuedBytes += params.data.length;
-          if (record.queuedBytes > MAX_ACK_BYTES * 2) return dispose();
+          if (record.queuedBytes > MAX_ACK_BYTES * 2) return dispose("response-limit");
           record.queued.push(params.data);
         } else feed(record, params.data);
       } else if (method === "Network.loadingFailed") {
-        dispose();
+        dispose("network-error");
       } else if (method === "Network.loadingFinished") {
         if (record.pending) record.finished = true;
-        else dispose();
+        else dispose("no-acknowledgement");
       }
-    } catch { dispose(); } // Optional detection must not affect the request or manual Sent.
+    } catch { dispose("observer-error"); } // Optional detection must not affect the request or manual Sent.
   };
   try {
-    if (!dbg || dbg.isAttached()) return { dispose() {} }; // Never take another debugger's ownership.
+    if (!dbg || dbg.isAttached()) { dispose("debugger-unavailable"); return { dispose() {} }; } // Never take another debugger's ownership.
     dbg.attach("1.3");
     attached = true;
     dbg.on("message", onMessage);
     dbg.on("detach", onDetach);
     void dbg.sendCommand("Network.enable", { maxPostDataSize: MAX_REQUEST_BYTES,
-      maxResourceBufferSize: MAX_ACK_BYTES, maxTotalBufferSize: MAX_ACK_BYTES }).catch(dispose);
-  } catch { dispose(); }
+      maxResourceBufferSize: MAX_ACK_BYTES, maxTotalBufferSize: MAX_ACK_BYTES }).catch(() => dispose("observer-error"));
+  } catch { dispose("observer-error"); }
   return { dispose };
 }
 

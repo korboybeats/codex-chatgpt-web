@@ -1324,7 +1324,7 @@ class BrowserHost {
       || upload.contentsId !== evidence.contentsId || upload.frame !== evidence.frame)) return;
     this.confirmManualSent(tab.id);
     this.logger.info("browser.manual_prompt_auto_confirmed", { tabId: tab.id, traceId: tab.traceId,
-      signal: evidence.serverAcknowledged ? "server-handoff" : "connector-start" });
+      signal: evidence.serverAcknowledged ? "server-ack" : "connector-start" });
   }
 
   bindChatGptBackendRecovery() {
@@ -2239,6 +2239,11 @@ class BrowserHost {
     tab.manualAckObserver = null;
     if (tab.autoSentEnabled) {
       tab.manualAckObserver = observeSubmissionAck(tab.view?.webContents, {
+        unavailable: reason => {
+          if (this.manualAutoSentEligible(tab)) this.logger.info("browser.manual_ack_unavailable", {
+            tabId: tab.id, traceId: tab.traceId, reason,
+          });
+        },
         eligible: () => this.manualAutoSentEligible(tab),
         evidence: () => tab.manualSubmission,
         acknowledged: evidence => {

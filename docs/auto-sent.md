@@ -24,7 +24,11 @@ Auto Sent requires all of these facts, in either event order:
 2. `onResponseStarted` for that exact native request reports an uncached HTTP 200 event stream.
    This is transport evidence only; a successful HTTP status is insufficient on its own.
 3. The server acknowledges that exact request with a `resume_conversation_token` followed by a
-   `stream_handoff`, with the same conversation ID and a nonempty turn-exchange ID. A short-lived,
+   `stream_handoff`, with the same conversation ID and a nonempty turn-exchange ID. Pro instead
+   returns a root `add` conversation snapshot: its successful system message must name the exact
+   outgoing user message as its parent, match the acknowledged conversation, and carry no error.
+   This is explicit acceptance of that user message, before model reasoning or connector startup.
+   An HTTP success or an unrelated system message is insufficient. A short-lived,
    read-only Electron debugger Network observer matches the entire request-body SHA-256 to the
    native request and checks the root frame before reading at most 64 KiB of the initial response.
    It detaches as soon as acknowledgement is established; token and response content are discarded.
@@ -62,7 +66,8 @@ an unrelated upload in that same owned tab; no content is retained, logged or tr
 from other tabs and disk-backed uploads are never opened. No upload can confirm Sent without the
 later matching big-paste message and all other signals. Stored evidence contains native identity,
 opaque upload identifiers and acceptance/match metadata, never uploaded bytes,
-request bodies or headers. Logs contain event names, local tab/trace IDs and fixed failure reasons.
+request bodies or headers. Logs contain event names, local tab/trace IDs and fixed failure reasons. Failed early observation
+reports `browser.manual_ack_unavailable` with a fixed reason, never exception or response contents.
 
 ## Failure behavior
 
@@ -117,6 +122,6 @@ are simulated. These tests do not establish that a live account uses a supported
 
 For account validation, enable the setting before starting a fresh Zero Risk turn. Paste the prompt
 and verify the launcher still offers Sent. Select the connector and desired model yourself, then send
-in ChatGPT. The server handoff should produce `browser.manual_prompt_auto_confirmed` exactly once,
-before connector start, followed by normal completion. Unsupported handoffs use connector fallback. Repeat with manual Sent, an edited prompt, and retained and
+in ChatGPT. The server acknowledgement should produce `browser.manual_prompt_auto_confirmed` exactly once,
+before connector start, followed by normal completion. Unsupported acknowledgements use connector fallback. Repeat with manual Sent, an edited prompt, and retained and
 compaction turns. Never use automation to submit the live ChatGPT prompt for this test.
