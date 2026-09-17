@@ -75,6 +75,8 @@ irm https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install
 
 Zero Risk 不读取或操作 ChatGPT 页面。请自行选择模型和 `Codex Zero Risk` 连接器，粘贴并发送准备好的提示词，再在启动器中确认 **Sent**。自动模式的每个模型条目对应固定的 ChatGPT 模式；Codex 的 Effort 和 Speed 选项不会覆盖它。
 
+可选的 [Auto Sent](docs/auto-sent.md) 设置会在确认手动提交的完整提示词及对应连接器启动后，自动确认 Sent。此设置默认关闭，手动 Sent 按钮始终可用。
+
 <a id="full-harness"></a>
 
 ### 完整 harness

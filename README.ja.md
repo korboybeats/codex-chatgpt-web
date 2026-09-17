@@ -75,6 +75,8 @@ irm https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install
 
 Zero Risk は ChatGPT ページを読み取ったり操作したりしません。モデルと `Codex Zero Risk` コネクタを自分で選び、用意されたプロンプトを貼り付けて送信し、ランチャーで **Sent** を確認してください。自動モードの各モデル項目は固定の ChatGPT モードに対応し、Codex の Effort や Speed では上書きされません。
 
+任意の [Auto Sent](docs/auto-sent.md) 設定では、手動送信した正確なプロンプトと対応するコネクターの開始を確認した後、Sent を自動確認できます。初期設定はオフです。手動の Sent ボタンは引き続き使用できます。
+
 <a id="full-harness"></a>
 
 ### Full ハーネス

@@ -75,6 +75,8 @@ irm https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install
 
 Zero Risk는 ChatGPT 페이지를 읽거나 조작하지 않습니다. 모델과 `Codex Zero Risk` 커넥터를 직접 선택하고, 준비된 프롬프트를 붙여넣어 전송한 다음 런처에서 **Sent**를 확인하세요. 자동 모드의 각 모델 항목은 고정된 ChatGPT 모드에 대응하며, Codex의 Effort와 Speed 설정으로 바뀌지 않습니다.
 
+선택 사항인 [Auto Sent](docs/auto-sent.md) 설정은 직접 전송한 정확한 프롬프트와 해당 커넥터의 시작을 확인한 뒤 Sent를 자동으로 확인합니다. 기본값은 꺼짐이며, 수동 Sent 버튼도 계속 사용할 수 있습니다.
+
 <a id="full-harness"></a>
 
 ### Full harness
