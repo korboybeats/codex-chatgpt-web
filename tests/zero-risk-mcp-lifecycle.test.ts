@@ -397,3 +397,51 @@ describe("Zero Risk public MCP ABI", () => {
     }
   }, 30_000);
 });
+
+for (const remote of [false, true]) test(`Auto Sent connector observation preserves Sent gate (remote: ${remote})`, async () => {
+  const socketPath = endpoint(`auto-sent-observer-${remote}`);
+  const broker = TurnBroker.forSocket(socketPath);
+  await broker.listen();
+  const owner = remote ? new RemoteTurnBroker(socketPath) : broker;
+  try {
+    const request = await owner.registerSafe(environment(), nonceA, undefined, 'auto-sent-owner');
+    const other = await owner.registerSafe(environment(), nonceB, undefined, 'other-owner');
+    const abort = new AbortController();
+    let observed = false;
+    const observation = owner.waitForSafeConnectorStart(request, nonceA, abort.signal).then(() => { observed = true; });
+    broker.startSafeTurn(other);
+    await Bun.sleep(10);
+    expect(observed).toBe(false);
+    await expect(Promise.resolve().then(() => owner.waitForSafeConnectorStart(request, nonceB))).rejects.toThrow();
+    broker.startSafeTurn(request);
+    await observation;
+    expect(observed).toBe(true);
+    let running = false;
+    const started = owner.waitForSafeStart(request).then(() => { running = true; });
+    await Bun.sleep(10);
+    expect(running).toBe(false);
+    expect(() => broker.completeSafeTurn(request, 'must not complete')).toThrow('has not started');
+    await owner.confirmSafeTurnSent(request, nonceA);
+    await started;
+    expect(running).toBe(true);
+    await owner.waitForSafeConnectorStart(request, nonceA);
+    await owner.revoke(request);
+    await expect(owner.waitForSafeConnectorStart(request, nonceA)).rejects.toThrow();
+    const waiting = owner.waitForSafeConnectorStart(other, nonceB);
+    await waiting;
+  } finally { await broker.close(); }
+});
+
+test('Auto Sent observer cancels on abort or revoked ownership', async () => {
+  const broker = TurnBroker.forSocket(endpoint('auto-sent-abort'));
+  try {
+    const request = await broker.registerSafe(environment(), nonceA);
+    const abort = new AbortController();
+    const waiting = broker.waitForSafeConnectorStart(request, nonceA, abort.signal);
+    abort.abort();
+    await expect(waiting).rejects.toThrow();
+    const revoked = broker.waitForSafeConnectorStart(request, nonceA);
+    broker.revoke(request);
+    await expect(revoked).rejects.toThrow();
+  } finally { await broker.close(); }
+});

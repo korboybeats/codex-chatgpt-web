@@ -28,6 +28,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       experimentalBiggerContext: false,
       experimentalSkillAttachments: false,
       zeroRiskProEnabled: false,
+      autoSentEnabled: false,
       browserSmokePassed: false,
       browserSmokeVersion: null,
       sidebarOpen: true,
@@ -55,6 +56,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       experimentalBiggerContext: false,
       experimentalSkillAttachments: false,
       zeroRiskProEnabled: false,
+      autoSentEnabled: false,
       browserSmokePassed: true,
       browserSmokeVersion: "0.2.0",
       sidebarOpen: true,
@@ -132,6 +134,7 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       experimentalBiggerContext: false,
       experimentalSkillAttachments: false,
       zeroRiskProEnabled: false,
+      autoSentEnabled: false,
       browserSmokePassed: false,
       browserSmokeVersion: null,
       sidebarOpen: true,
@@ -180,4 +183,19 @@ test("session refresh reminders are deferred by exactly 48 hours", () => {
   assert.equal(SESSION_REFRESH_REMINDER_INTERVAL_MS, 48 * 60 * 60 * 1000);
   assert.equal(nextSessionRefreshReminderAt(now), "2026-08-07T12:00:00.000Z");
   assert.throws(() => nextSessionRefreshReminderAt(Number.NaN), /must be finite/);
+});
+
+test('Auto Sent defaults off, persists an explicit boolean and rejects corrupt settings', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-sent-setting-'));
+  const file = path.join(root, 'state.json');
+  try {
+    const store = createStateStore(file);
+    assert.equal(store.read().autoSentEnabled, false);
+    store.update({ autoSentEnabled: true });
+    assert.equal(createStateStore(file).read().autoSentEnabled, true);
+    for (const value of ['true', 1, {}, null]) {
+      fs.writeFileSync(file, JSON.stringify({ version: 1, autoSentEnabled: value }));
+      assert.equal(createStateStore(file).read().autoSentEnabled, false);
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

@@ -18,6 +18,7 @@ export interface LauncherState {
   experimentalBiggerContext: boolean;
   experimentalSkillAttachments: boolean;
   zeroRiskProEnabled: boolean;
+  autoSentEnabled: boolean;
   sidebarOpen: boolean;
   sidebarWidth: number;
   browserSmokePassed?: boolean;
@@ -166,7 +167,7 @@ export interface LauncherApi {
     targetMode: BrowserInteractionMode;
   }>;
   setPreference(
-    key: "keepRunningOnClose" | "showBrowserDuringTurns",
+    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "autoSentEnabled",
     value: boolean,
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;

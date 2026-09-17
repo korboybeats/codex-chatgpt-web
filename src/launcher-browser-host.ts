@@ -402,6 +402,7 @@ export interface LauncherManualTurnStart extends LauncherManualTurnOwner {
 }
 
 export interface LauncherManualTurnLease {
+  autoSent?: boolean;
   tabId: string;
   reused: boolean;
   deadlineAt: string | null;
@@ -423,7 +424,7 @@ export const LAUNCHER_MANUAL_TURN_END_TIMEOUT_MS = 15_000;
 
 async function launcherManualRequest(
   descriptor: LauncherBrowserHostDescriptor,
-  action: "start" | "wait-sent" | "wait-terminal" | "started" | "end" | "cancel",
+  action: "connector-started" | "start" | "wait-sent" | "wait-terminal" | "started" | "end" | "cancel",
   body: LauncherManualTurnStart | LauncherManualTurnOwner | LauncherManualTurnEnd,
   timeoutMs: number,
   abortSignal?: AbortSignal,
@@ -506,6 +507,7 @@ export async function startLauncherManualTurn(
   );
   if (!response.ok) throwManualControlError(response, body);
   return {
+    ...(body.autoSent === true ? { autoSent: true } : {}),
     tabId: body.tabId as string,
     reused: body.reused as boolean,
     deadlineAt: body.deadlineAt as string | null,
@@ -537,6 +539,18 @@ export async function waitForLauncherManualSent(
     }
     return { sentAt: body.sentAt as string | null };
   }
+}
+
+export async function observeLauncherManualConnectorStarted(
+  descriptorPath: string,
+  owner: LauncherManualTurnOwner,
+  abortSignal: AbortSignal,
+): Promise<void> {
+  const { response, body } = await launcherManualRequest(
+    readLauncherBrowserHostDescriptor(descriptorPath), "connector-started", owner,
+    LAUNCHER_MANUAL_TURN_END_TIMEOUT_MS, abortSignal,
+  );
+  if (!response.ok || body.ok !== true) throw new Error("Launcher could not observe the Zero Risk connector");
 }
 
 export async function markLauncherManualTurnStarted(

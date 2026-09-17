@@ -1693,6 +1693,16 @@ function SettingsSurface({
               .catch((cause) => setError(messageOf(cause)))}
           />
         </SettingRow>
+        {snapshot.state.browserInteractionMode === "manual" ? (
+          <SettingRow body={copy.autoSentBody} label={copy.autoSent}>
+            <Switch
+              checked={snapshot.state.autoSentEnabled}
+              onChange={(checked) => void api!.setPreference("autoSentEnabled", checked)
+                .then(updateState)
+                .catch((cause) => setError(messageOf(cause)))}
+            />
+          </SettingRow>
+        ) : null}
         <SettingRow body={copy.showDuringTurnsBody} label={copy.showDuringTurns}>
           <Switch
             checked={snapshot.state.showBrowserDuringTurns}

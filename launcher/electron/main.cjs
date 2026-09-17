@@ -903,8 +903,15 @@ function registerIpc({ logger, stateStore }) {
     return { state, credentialsRequired: false, targetMode: mode };
   });
   handle("launcher:set-preference", (_event, key, value) => {
-    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns";
+    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoSentEnabled";
     if (!ordinary) throw new Error("Unknown preference");
+    if (key === "autoSentEnabled") {
+      for (const tab of browserHost.turnTabs.values()) {
+        tab.autoSentEnabled = false;
+        tab.manualSubmission = null;
+        tab.manualConnectorStarted = false;
+      }
+    }
     return stateStore.update({ [key]: value === true });
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
@@ -1102,6 +1109,7 @@ async function start() {
     profile: LAUNCHER_PROFILE.kind,
     publishState: (state) => send("launcher:browser-state", state),
     showWindow: showMainWindow,
+    getAutoSentEnabled: () => stateStore.read().autoSentEnabled,
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
   });
   await browserHost.ready();

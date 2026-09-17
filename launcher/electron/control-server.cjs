@@ -105,6 +105,7 @@ class BrowserControlServer {
       ["/v1/manual/wait-sent", "wait-sent"],
       ["/v1/manual/wait-terminal", "wait-terminal"],
       ["/v1/manual/started", "started"],
+      ["/v1/manual/connector-started", "connector-started"],
       ["/v1/manual/end", "end"],
       ["/v1/manual/cancel", "cancel"],
     ]).get(request.url);
@@ -267,6 +268,11 @@ class BrowserControlServer {
             throw new Error("manual terminal state is invalid");
           }
           writeJson(response, 200, { ok: true, status: observed.status });
+          return;
+        }
+        if (manualAction === "connector-started") {
+          host.observeManualConnectorStarted(body.traceId, body.helperPid);
+          writeJson(response, 200, { ok: true });
           return;
         }
         if (manualAction === "started") {

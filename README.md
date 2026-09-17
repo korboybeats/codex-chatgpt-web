@@ -75,6 +75,14 @@ Automatic modes offer Luna/Think when the account has no reasoning selector; oth
 
 Zero Risk does not read or operate the ChatGPT page. Choose the model and `Codex Zero Risk` connector yourself, paste and send the prepared prompt, then confirm **Sent** in the launcher. Automatic model entries each select a fixed ChatGPT mode; Codex’s Effort and Speed rows do not override it.
 
+Settings → **Automatically confirm Sent after manual ChatGPT submission** is an optional,
+default-off Zero Risk setting for new turns. It passively matches the exact outgoing prompt in the
+owned tab and waits for the matching connector start before confirming Sent. It never submits a
+prompt, changes the model, or reads the DOM. Keep using **Sent** if automatic confirmation has not
+arrived before the existing timer expires, especially with slow reasoning models. See
+[Auto Sent](docs/auto-sent.md) for evidence requirements and fallback behavior.
+
+
 <a id="full-harness"></a>
 
 ### Full harness

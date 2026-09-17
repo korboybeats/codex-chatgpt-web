@@ -12,7 +12,7 @@ import {
 import { chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapters/chatgpt-web/turn-broker";
 import { encodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compaction";
-import { LAUNCHER_BROWSER_HOST_KIND, LAUNCHER_BROWSER_IDLE_URL } from "../src/launcher-browser-host";
+import { observeLauncherManualConnectorStarted, LAUNCHER_BROWSER_HOST_KIND, LAUNCHER_BROWSER_IDLE_URL } from "../src/launcher-browser-host";
 import { CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL } from "../src/chatgpt-web-models";
 import { defaultBrokerEndpoint } from "../src/config";
 import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig } from "../src/types";
@@ -96,7 +96,7 @@ for (const scenario of [
   { format: "v1", finalWins: false },
   { format: "v2", finalWins: false },
   { format: "v2", finalWins: true },
-] as const) test(`Zero Risk ${scenario.format} compaction resumes with exact launcher ownership (final wins: ${scenario.finalWins})`, async () => {
+] as const) for (const autoSent of [false, true]) test(`Zero Risk ${scenario.format} compaction resumes with exact launcher ownership (final wins: ${scenario.finalWins}, Auto Sent: ${autoSent})`, async () => {
   // Real adapter, broker, and launcher lifecycle. Only the Electron view/clipboard and the
   // human/model actions are simulated: a mock start/end that omits tombstones misses #318.
   const require = createRequire(import.meta.url);
@@ -109,6 +109,7 @@ for (const scenario of [
   const logger = { info(event: string) { logs.push(event); }, warn() {}, error() {} };
   const host = Object.assign(Object.create(BrowserHost.prototype), {
     turnTabs: new Map(), manualTerminalSignals: new Map(), manualCompletionSignals: new Map(),
+    getAutoSentEnabled: () => autoSent,
     manualOperation: null, clipboard: { writeText() {} }, logger,
     publishState() {}, snapshot: () => ({}), showWindow() {}, show() {}, writeDescriptor() {},
     createManualTurnTab(traceId: string, helperPid: number, conversationKey: string | undefined,
@@ -119,6 +120,10 @@ for (const scenario of [
         manualDeadlineTimer: null, manualWaiters: new Set(), manualTerminalWaiters: new Set(),
         prompt, promptDigest: createHash("sha256").update(prompt).digest("hex"), manualConversationReused: false,
       };
+      Object.assign(tab, { view: { webContents: {
+        id: host.turnTabs.size + 1, mainFrame: { url: "https://chatgpt.com/?temporary-chat=true" },
+        isDestroyed: () => false,
+      } } });
       host.turnTabs.set(tab.id, tab);
       return tab;
     },
@@ -143,14 +148,32 @@ for (const scenario of [
   let modelAction: Promise<void> | undefined;
   const control: ChatGptZeroRiskManualControl = {
     async start(_path, activity) {
-      host.beginManualTurn(activity.traceId, activity.helperPid, activity.prompt,
+      const lease = host.beginManualTurn(activity.traceId, activity.helperPid, activity.prompt,
         activity.conversationKey, activity.resumePrompt, activity.compaction);
       starts.push(activity.traceId);
       bindings.set(activity.traceId, binding(activity.prompt).request_id);
+      return lease;
     },
+    observeConnectorStarted: observeLauncherManualConnectorStarted,
     async waitSent(_path, owner) {
-      host.confirmManualSent(owner.traceId);
+      if (autoSent) {
+        const tab = host.turnTabs.get(owner.traceId);
+        const request = {
+          id: starts.length, webContentsId: tab.view.webContents.id, frame: tab.view.webContents.mainFrame,
+          method: "POST", resourceType: "xhr", url: "https://chatgpt.com/backend-api/f/conversation",
+          uploadData: [{ bytes: Buffer.from(JSON.stringify({ action: "next", messages: [{
+            id: `user-message-${starts.length}`, author: { role: "user" },
+            content: { content_type: "text", parts: [tab.prompt] },
+          }] })) }],
+        };
+        host.observeManualSubmission(request);
+        host.observeManualSubmissionResponse({ ...request, statusCode: 200, fromCache: false,
+          responseHeaders: { "content-type": ["text/event-stream"] } });
+        expect(tab.manualState).toBe("awaiting-user");
+      } else host.confirmManualSent(owner.traceId);
       broker.startSafeTurn(bindings.get(owner.traceId)!);
+      const result = await host.waitManualSent(owner.traceId, owner.helperPid, 2_000);
+      expect(result.status).toBe("sent");
     },
     waitTerminal: noManualTerminal,
     async markStarted(_path, owner) {

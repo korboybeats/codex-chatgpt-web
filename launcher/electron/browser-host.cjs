@@ -24,6 +24,8 @@ const {
   shellZoomActionForInput,
 } = require("./browser-state.cjs");
 
+const { SUBMISSION_FILTER, matchesManualPrompt, successfulSubmissionResponse } = require("./manual-submission.cjs");
+
 const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 const IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
@@ -317,6 +319,7 @@ class BrowserHost {
     showWindow = () => {},
     clipboardApi = clipboard,
     getBrowserInteractionMode = () => "automatic",
+    getAutoSentEnabled = () => false,
   }) {
     if (typeof getConnectorName !== "function") {
       throw new Error("Browser host connector-name resolver is unavailable");
@@ -346,6 +349,7 @@ class BrowserHost {
     this.showWindow = showWindow;
     this.clipboard = clipboardApi;
     this.getBrowserInteractionMode = getBrowserInteractionMode;
+    this.getAutoSentEnabled = getAutoSentEnabled;
     this.runBrowserHelperOperation = runBrowserHelperOperation;
     this.verifyConnectorWithBrowserHelper = verifyConnectorWithBrowserHelper;
     this.surfaceId = randomBytes(24).toString("base64url");
@@ -414,6 +418,7 @@ class BrowserHost {
     this.bindShellZoomShortcuts(this.window.webContents);
     this.bindShellZoomShortcuts(this.view.webContents);
     this.bindChatGptBackendRecovery();
+    this.bindManualSubmissionObserver();
     this.bindWebContents();
     this.initializationReady = this.initializePrimaryView().catch((error) => {
       this.logger.error("browser.initialization_failed", {
@@ -909,6 +914,10 @@ class BrowserHost {
     });
     contents.on("did-start-navigation", (_event, url, inPlace, mainFrame) => {
       if (!mainFrame) return;
+      if (!inPlace) {
+        tab.manualSubmission = null;
+        tab.manualConnectorStarted = false;
+      }
       invalidateConversation(url, inPlace);
       tab.url = url;
       tab.loading = true;
@@ -1163,6 +1172,82 @@ class BrowserHost {
       await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
     }
     await this.waitForAuthenticated(60_000);
+  }
+
+  // Session-level hooks are installed once: Electron permits only one listener per event.
+  // The existing automatic-mode recovery onCompleted hook remains untouched.
+  bindManualSubmissionObserver() {
+    const requests = this.view.webContents.session.webRequest;
+    requests.onBeforeRequest(SUBMISSION_FILTER, (details, callback) => {
+      try { this.observeManualSubmission(details); }
+      catch { /* Detection must never interrupt a browser request or manual Sent. */ }
+      finally { callback({}); }
+    });
+    requests.onResponseStarted(SUBMISSION_FILTER, details => {
+      try { this.observeManualSubmissionResponse(details); }
+      catch { /* Optional observation cannot disrupt the browser lifecycle. */ }
+    });
+    const discard = details => {
+      for (const tab of this.turnTabs.values()) {
+        if (tab.manualSubmission?.requestId === details.id) tab.manualSubmission = null;
+      }
+    };
+    requests.onBeforeRedirect(SUBMISSION_FILTER, discard);
+    requests.onErrorOccurred(SUBMISSION_FILTER, discard);
+  }
+
+  manualAutoSentEligible(tab) {
+    return this.getAutoSentEnabled?.() === true && tab?.autoSentEnabled === true
+      && tab.interactionMode === "manual" && tab.manualState === "awaiting-user"
+      && tab.status === "running" && this.turnTabs.get(tab.id) === tab
+      && tab.manualDeadlineAt > Date.now() && processRunning(tab.helperPid)
+      && tab.view?.webContents && !tab.view.webContents.isDestroyed();
+  }
+
+  observeManualSubmission(details) {
+    const tab = [...this.turnTabs.values()].find(candidate => candidate.view?.webContents?.id === details.webContentsId);
+    if (!this.manualAutoSentEligible(tab)) return;
+    const contents = tab.view.webContents;
+    if (!details.frame || details.frame !== contents.mainFrame
+      || new URL(details.frame.url).origin !== CHATGPT_ORIGIN) return;
+    // Any later request supersedes the earlier candidate, including unrelated text or regeneration.
+    tab.manualSubmission = null;
+    if (!matchesManualPrompt(details, tab.promptDigest)) return;
+    tab.manualSubmission = {
+      requestId: details.id, traceId: tab.traceId, helperPid: tab.helperPid,
+      contentsId: contents.id, frame: details.frame, accepted: false,
+    };
+    this.logger.info("browser.manual_submission_observed", { tabId: tab.id, traceId: tab.traceId });
+  }
+
+  observeManualSubmissionResponse(details) {
+    const tab = [...this.turnTabs.values()].find(candidate => candidate.manualSubmission?.requestId === details.id);
+    if (!this.manualAutoSentEligible(tab)) return;
+    const evidence = tab.manualSubmission;
+    if (details.webContentsId !== evidence.contentsId || !SUBMISSION_FILTER.urls.includes(details.url)
+      || !successfulSubmissionResponse(details)) {
+      tab.manualSubmission = null;
+      return;
+    }
+    evidence.accepted = true;
+    this.tryConfirmManualSubmission(tab);
+  }
+
+  observeManualConnectorStarted(traceId, helperPid) {
+    const tab = [...this.turnTabs.values()].find(candidate => candidate.traceId === traceId);
+    if (!this.manualAutoSentEligible(tab) || tab.helperPid !== helperPid) return;
+    tab.manualConnectorStarted = true;
+    this.tryConfirmManualSubmission(tab);
+  }
+
+  tryConfirmManualSubmission(tab) {
+    const evidence = tab.manualSubmission;
+    if (!this.manualAutoSentEligible(tab) || !tab.manualConnectorStarted || !evidence?.accepted
+      || evidence.traceId !== tab.traceId || evidence.helperPid !== tab.helperPid
+      || evidence.contentsId !== tab.view.webContents.id
+      || evidence.frame !== tab.view.webContents.mainFrame) return;
+    this.confirmManualSent(tab.id);
+    this.logger.info("browser.manual_prompt_auto_confirmed", { tabId: tab.id, traceId: tab.traceId });
   }
 
   bindChatGptBackendRecovery() {
@@ -1554,6 +1639,8 @@ class BrowserHost {
       if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
       tab.manualDeadlineTimer = null;
       tab.manualDeadlineAt = null;
+      tab.manualSubmission = null;
+      tab.manualConnectorStarted = false;
       tab.prompt = null;
       tab.promptDigest = null;
       for (const resolve of tab.manualWaiters || []) resolve({ status: "cancelled" });
@@ -1905,6 +1992,8 @@ class BrowserHost {
     tab.manualDeadlineAt = null;
     tab.manualState = status === "timeout" ? "timed-out" : status;
     tab.lastHeartbeatAt = Date.now();
+    tab.manualSubmission = null;
+    tab.manualConnectorStarted = false;
     tab.prompt = null;
     tab.promptDigest = null;
     this.rememberManualTerminal(tab.traceId, tab.helperPid, status);
@@ -2011,6 +2100,7 @@ class BrowserHost {
         reused: true,
         deadlineAt: sameTrace.manualDeadlineAt ? new Date(sameTrace.manualDeadlineAt).toISOString() : null,
         state: sameTrace.manualState,
+        autoSent: sameTrace.autoSentEnabled === true,
       };
     }
     const retained = conversationKey
@@ -2058,6 +2148,9 @@ class BrowserHost {
         throw error;
       }
     }
+    tab.autoSentEnabled = this.getAutoSentEnabled?.() === true;
+    tab.manualSubmission = null;
+    tab.manualConnectorStarted = false;
     this.armManualTurnDeadline(tab);
     this.selectedTabId = tab.id;
     this.showWindow();
@@ -2074,6 +2167,7 @@ class BrowserHost {
       reused: retained.length === 1,
       deadlineAt: new Date(tab.manualDeadlineAt).toISOString(),
       state: tab.manualState,
+      autoSent: tab.autoSentEnabled,
     };
   }
 
@@ -2154,6 +2248,8 @@ class BrowserHost {
     // remains cancellable through its helper or tab, including before the first MCP bind.
     tab.manualDeadlineAt = null;
     tab.sentAt = new Date().toISOString();
+    tab.manualSubmission = null;
+    tab.manualConnectorStarted = false;
     tab.prompt = null;
     tab.message = "Prompt sent; waiting for ChatGPT to start through the Codex harness";
     for (const resolve of tab.manualWaiters) resolve({ status: "sent", sentAt: tab.sentAt });
@@ -2201,6 +2297,8 @@ class BrowserHost {
       if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
       tab.manualDeadlineTimer = null;
       tab.manualDeadlineAt = null;
+      tab.manualSubmission = null;
+      tab.manualConnectorStarted = false;
       tab.prompt = null;
       tab.promptDigest = null;
       tab.manualState = "completed";
@@ -2217,6 +2315,8 @@ class BrowserHost {
       if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
       tab.manualDeadlineTimer = null;
       tab.manualDeadlineAt = null;
+      tab.manualSubmission = null;
+      tab.manualConnectorStarted = false;
       tab.prompt = null;
       tab.promptDigest = null;
       tab.manualState = "completed";
@@ -2963,6 +3063,8 @@ class BrowserHost {
     for (const tab of this.turnTabs.values()) {
       if (tab.interactionMode === "manual") {
         if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
+        tab.manualSubmission = null;
+        tab.manualConnectorStarted = false;
         tab.prompt = null;
         tab.promptDigest = null;
         for (const resolve of tab.manualWaiters || []) resolve({ status: "cancelled" });

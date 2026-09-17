@@ -9,6 +9,7 @@ import {
   LauncherManualTurnFailedError,
   LauncherManualTurnTimedOutError,
   markLauncherManualTurnStarted,
+  observeLauncherManualConnectorStarted,
   releaseLauncherRetainedConversation,
   startLauncherManualTurn,
   waitForLauncherManualSent,
@@ -131,6 +132,7 @@ export interface ChatGptZeroRiskManualControl {
     owner: LauncherManualTurnOwner,
     options?: { abortSignal?: AbortSignal; timeoutMs?: number },
   ): Promise<{ status: "cancelled" | "failed" }>;
+  observeConnectorStarted?(descriptorPath: string, owner: LauncherManualTurnOwner, signal: AbortSignal): Promise<void>;
   markStarted(descriptorPath: string, owner: LauncherManualTurnOwner): Promise<void>;
   end(descriptorPath: string, activity: LauncherManualTurnEnd): Promise<unknown>;
   cancel(descriptorPath: string, owner: LauncherManualTurnOwner): Promise<void>;
@@ -141,6 +143,7 @@ const launcherZeroRiskManualControl: ChatGptZeroRiskManualControl = {
   waitSent: waitForLauncherManualSent,
   waitTerminal: waitForLauncherManualTerminal,
   markStarted: markLauncherManualTurnStarted,
+  observeConnectorStarted: observeLauncherManualConnectorStarted,
   end: endLauncherManualTurn,
   cancel: cancelLauncherManualTurn,
 };
@@ -569,7 +572,7 @@ export function createChatGptWebAdapter(
               text: "> **Action required in Zero Risk**\n>\n> Open the launcher, copy and paste the prompt into ChatGPT, add any images yourself because Zero Risk cannot transfer them, select the `Codex Zero Risk` plugin and the model you want, send the prompt, then confirm it was sent in the launcher.",
             });
           }
-          await zeroRiskManualControl.start(retainedLauncherDescriptor, {
+          const lease = await zeroRiskManualControl.start(retainedLauncherDescriptor, {
             ...owner,
             prompt: compiled.text,
             ...(resumeCompiled ? { resumePrompt: resumeCompiled.text } : {}),
@@ -577,9 +580,28 @@ export function createChatGptWebAdapter(
             ...(parsed._compactionRequest ? { compaction: true as const } : {}),
           });
           launcherStarted = true;
-          await zeroRiskManualControl.waitSent(retainedLauncherDescriptor, owner, {
-            abortSignal: browserAbort.signal,
-          });
+          const observationAbort = new AbortController();
+          const abortObservation = () => observationAbort.abort();
+          browserAbort.signal.addEventListener("abort", abortObservation, { once: true });
+          // Optional evidence channel. Errors leave the existing manual Sent path usable.
+          const observation = lease && typeof lease === "object" && "autoSent" in lease
+            && lease.autoSent === true && zeroRiskManualControl.observeConnectorStarted
+            ? broker.waitForSafeConnectorStart(activeToken, surfaceNonce, observationAbort.signal)
+              .then(() => observationAbort.signal.aborted ? undefined
+                : zeroRiskManualControl.observeConnectorStarted!(retainedLauncherDescriptor, owner, observationAbort.signal))
+              .catch(() => {
+                if (!observationAbort.signal.aborted) console.info("[chatgpt-web] Auto Sent unavailable; use manual Sent");
+              })
+            : Promise.resolve();
+          try {
+            await zeroRiskManualControl.waitSent(retainedLauncherDescriptor, owner, {
+              abortSignal: browserAbort.signal,
+            });
+          } finally {
+            observationAbort.abort();
+            browserAbort.signal.removeEventListener("abort", abortObservation);
+            await observation;
+          }
           await broker.confirmSafeTurnSent(activeToken, surfaceNonce);
           submission.phase = "accepted";
           if (!parsed._compactionRequest) trace.push({

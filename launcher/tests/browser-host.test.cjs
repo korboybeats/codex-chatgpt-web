@@ -3263,3 +3263,172 @@ test("manual turns have no live-session TTL but are revoked when their owner pro
     status: "failed",
   });
 });
+
+function autoSentFixture(t, { enabled = true, compaction = false } = {}) {
+  const { fixture } = manualTurnFixture();
+  const logs = [];
+  fixture.getAutoSentEnabled = () => enabled;
+  fixture.logger = { info: (...args) => logs.push(args), warn: (...args) => logs.push(args), error: (...args) => logs.push(args) };
+  const prompt = 'PRIVATE_AUTO_SENT_PROMPT\nline two\n<request_id>exact-new-turn</request_id>';
+  const lease = fixture.beginManualTurn('auto_trace_1', process.pid, prompt, 'b'.repeat(64), undefined, compaction);
+  const tab = fixture.turnTabs.get(lease.tabId);
+  const contents = new EventEmitter();
+  Object.assign(contents, {
+    id: 42, mainFrame: { url: 'https://chatgpt.com/?temporary-chat=true' },
+    isDestroyed: () => false, getURL: () => contents.mainFrame.url, setWindowOpenHandler() {},
+    executeJavaScript() { throw new Error('Auto Sent must not inspect or operate the DOM'); },
+    sendInputEvent() { throw new Error('Auto Sent must not synthesize input'); },
+  });
+  tab.view = { webContents: contents };
+  const listeners = {};
+  const webRequest = {};
+  for (const event of ['onBeforeRequest', 'onResponseStarted', 'onBeforeRedirect', 'onErrorOccurred']) {
+    webRequest[event] = (_filter, listener) => { listeners[event] = listener; };
+  }
+  fixture.view = { webContents: { session: { webRequest } } };
+  fixture.bindManualSubmissionObserver();
+  fixture.bindManualTurnContents(tab);
+  fixture.syncViewVisibility = () => {};
+  t.after(() => { for (const active of fixture.turnTabs.values()) clearTimeout(active.manualDeadlineTimer); });
+  const body = text => ({ action: 'next', messages: [{ id: 'new-user-message', author: { role: 'user' }, content: { content_type: 'text', parts: [text] } }] });
+  const request = (text = prompt, overrides = {}) => ({
+    id: 10, method: 'POST', resourceType: 'xhr', url: 'https://chatgpt.com/backend-api/f/conversation',
+    webContentsId: contents.id, frame: contents.mainFrame,
+    uploadData: [{ bytes: Buffer.from(JSON.stringify(body(text))) }], ...overrides,
+  });
+  const response = (overrides = {}) => ({
+    ...request(), statusCode: 200, fromCache: false, responseHeaders: { 'content-type': ['text/event-stream; charset=utf-8'] }, ...overrides,
+  });
+  const send = (details = request()) => {
+    let calls = 0;
+    listeners.onBeforeRequest(details, result => { calls++; assert.deepEqual(result, {}); });
+    assert.equal(calls, 1);
+  };
+  const start = () => fixture.observeManualConnectorStarted(tab.traceId, tab.helperPid);
+  return { fixture, tab, contents, prompt, logs, lease, listeners, body, request, response, send, start };
+}
+
+for (const connectorFirst of [false, true]) test(`Auto Sent requires exact native submission and connector (connector first: ${connectorFirst})`, async t => {
+  const f = autoSentFixture(t);
+  const waiting = f.fixture.waitManualSent(f.tab.traceId, process.pid);
+  f.send();
+  assert.equal(f.tab.manualState, 'awaiting-user');
+  if (connectorFirst) f.start();
+  f.listeners.onResponseStarted(f.response());
+  if (!connectorFirst) {
+    assert.equal(f.tab.manualState, 'awaiting-user'); // HTTP 200 alone is not acceptance.
+    f.start();
+  }
+  assert.equal(f.tab.manualState, 'sent');
+  assert.equal((await waiting).status, 'sent');
+  f.listeners.onResponseStarted(f.response()); f.start(); f.send();
+  f.fixture.confirmManualSent(f.tab.id);
+  assert.equal(f.logs.filter(([event]) => event === 'browser.manual_prompt_confirmed').length, 1);
+  assert.equal(f.logs.filter(([event]) => event === 'browser.manual_prompt_auto_confirmed').length, 1);
+  assert.equal(f.tab.manualSubmission, null);
+  const output = JSON.stringify([f.logs, f.fixture.snapshot()]);
+  assert.ok(!output.includes(f.prompt));
+  assert.ok(!output.includes('exact-new-turn'));
+  assert.ok(!output.includes('new-user-message'));
+  assert.ok(!output.includes('text/event-stream'));
+});
+
+for (const event of ['paste', 'input', 'Shift+Enter', 'Enter', 'click', 'upload-pending', 'upload-failed']) {
+  test(`${event} without a submitted network request never confirms Sent`, t => {
+    const f = autoSentFixture(t);
+    f.contents.emit(event, { key: 'Enter', shift: event === 'Shift+Enter' });
+    f.start(); // Even a matching connector call alone is insufficient.
+    assert.equal(f.tab.manualState, 'awaiting-user');
+    f.fixture.confirmManualSent(f.tab.id);
+    assert.equal(f.tab.manualState, 'sent');
+  });
+}
+
+for (const text of ['unrelated', '', 'PRIVATE_AUTO_SENT_PROMPT\nedited', 'previous retained prompt']) {
+  test(`edited/replaced/cleared/old prompt fails closed (${text.length} chars)`, t => {
+    const f = autoSentFixture(t);
+    f.send(f.request(text)); f.listeners.onResponseStarted(f.response()); f.start();
+    assert.equal(f.tab.manualState, 'awaiting-user');
+  });
+}
+
+for (const scenario of ['other-tab', 'iframe', 'old-trace', 'other-owner', 'regenerate', 'disabled', 'cache', 'rejected', 'network-error', 'redirect', 'unknown-response', 'old-response', 'dead-owner', 'deadline', 'manual-race', 'timeout-race', 'browser-restart', 'launcher-restart']) {
+  test(`Auto Sent isolates ${scenario}`, t => {
+    const f = autoSentFixture(t, { enabled: scenario !== 'disabled' });
+    const req = f.request();
+    if (scenario === 'other-tab') req.webContentsId++;
+    if (scenario === 'iframe') req.frame = { url: 'https://chatgpt.com' };
+    if (scenario === 'regenerate') req.uploadData = [{ bytes: Buffer.from(JSON.stringify({ ...f.body(f.prompt), action: 'variant' })) }];
+    f.send(req);
+    let res = f.response();
+    if (scenario === 'cache') res.fromCache = true;
+    if (scenario === 'rejected') res.statusCode = 429;
+    if (scenario === 'unknown-response') res.responseHeaders = { 'content-type': ['application/json'] };
+    if (scenario === 'old-response') res.id++;
+    f.listeners.onResponseStarted(res);
+    if (scenario === 'network-error') f.listeners.onErrorOccurred({ id: req.id });
+    if (scenario === 'redirect') f.listeners.onBeforeRedirect({ id: req.id });
+    if (scenario === 'old-trace') f.tab.traceId = 'different_trace';
+    if (scenario === 'other-owner') f.tab.helperPid++;
+    if (scenario === 'dead-owner') f.tab.helperPid = 99999999;
+    if (scenario === 'deadline') f.tab.manualDeadlineAt = Date.now();
+    if (scenario === 'manual-race') f.fixture.confirmManualSent(f.tab.id);
+    if (scenario === 'timeout-race') f.fixture.signalManualTerminal(f.tab, 'timeout');
+    if (scenario === 'browser-restart') f.contents.mainFrame = { url: 'https://chatgpt.com/' };
+    if (scenario === 'launcher-restart') f.fixture.turnTabs.clear();
+    f.fixture.observeManualConnectorStarted('auto_trace_1', process.pid);
+    assert.equal(f.tab.manualState, scenario === 'manual-race' ? 'sent' : scenario === 'timeout-race' ? 'timed-out' : 'awaiting-user');
+    assert.equal(f.logs.filter(([event]) => event === 'browser.manual_prompt_auto_confirmed').length, 0);
+    clearTimeout(f.tab.manualDeadlineTimer);
+  });
+}
+
+test('attachment upload completion can submit exact multimodal text; upload alone cannot', t => {
+  const f = autoSentFixture(t);
+  f.send(f.request(f.prompt, { url: 'https://chatgpt.com/backend-api/files' }));
+  f.start(); assert.equal(f.tab.manualState, 'awaiting-user');
+  const body = f.body(f.prompt);
+  body.messages[0].content = { content_type: 'multimodal_text', parts: [
+    { content_type: 'image_asset_pointer', asset_pointer: 'file-service://uploaded-file' }, f.prompt,
+  ] };
+  f.send(f.request(f.prompt, { uploadData: [{ bytes: Buffer.from(JSON.stringify(body)) }] }));
+  f.listeners.onResponseStarted(f.response());
+  assert.equal(f.tab.manualState, 'sent');
+});
+
+test('retained continuation resets evidence and requires the exact incremental prompt', t => {
+  const f = autoSentFixture(t);
+  f.send(); f.listeners.onResponseStarted(f.response()); f.start();
+  f.fixture.endManualTurn(f.tab.traceId, process.pid, 'completed', true);
+  const second = f.fixture.beginManualTurn('auto_trace_2', process.pid, 'full prompt', 'b'.repeat(64), 'incremental prompt');
+  assert.equal(second.reused, true);
+  f.listeners.onResponseStarted(f.response());
+  f.fixture.observeManualConnectorStarted('auto_trace_1', process.pid);
+  f.send(); f.start();
+  assert.equal(f.tab.manualState, 'awaiting-user');
+  f.send(f.request('incremental prompt', { id: 20 }));
+  f.listeners.onResponseStarted(f.response({ id: 20 }));
+  assert.equal(f.tab.manualState, 'sent');
+});
+
+test('Temporary Chat compaction handoff uses the same passive confirmation contract', t => {
+  const f = autoSentFixture(t, { compaction: true });
+  assert.equal(f.tab.manualSubmitTimeoutMs, MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS);
+  f.send(); f.listeners.onResponseStarted(f.response()); f.start();
+  assert.equal(f.tab.manualState, 'sent');
+  f.fixture.markManualTurnStarted(f.tab.traceId, process.pid);
+  f.fixture.endManualTurn(f.tab.traceId, process.pid, 'completed', false);
+  assert.equal(f.fixture.turnTabs.size, 0);
+});
+
+test('navigation clears pending evidence, and observer failure leaves the request untouched', t => {
+  const f = autoSentFixture(t);
+  f.send(); f.listeners.onResponseStarted(f.response());
+  f.contents.emit('did-start-navigation', {}, 'https://chatgpt.com/', false, true);
+  f.start(); assert.equal(f.tab.manualState, 'awaiting-user');
+  f.fixture.observeManualSubmission = () => { throw new Error('private parser error'); };
+  f.send();
+  f.fixture.confirmManualSent(f.tab.id);
+  assert.equal(f.tab.manualState, 'sent');
+  assert.ok(!JSON.stringify(f.logs).includes('private parser error'));
+});

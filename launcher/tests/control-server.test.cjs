@@ -530,3 +530,27 @@ test("browser control server rejects malformed retained-conversation contracts",
     await server.close();
   }
 });
+
+test('Auto Sent connector evidence requires launcher authentication and a valid owner envelope', async () => {
+  const calls = [];
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {} },
+    getBrowserHost: () => ({ observeManualConnectorStarted: (...args) => calls.push(args) }),
+    getPreferences: () => ({}),
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const send = (body, authorization = `Bearer ${token}`) => fetch(`${endpoint}/v1/manual/connector-started`, {
+    method: 'POST', headers: { authorization, 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+  try {
+    const owner = { traceId: 'auto_sent_trace', helperPid: process.pid };
+    assert.equal((await send(owner, 'Bearer wrong')).status, 401);
+    assert.equal((await send({ ...owner, helperPid: 0 })).status, 400);
+    assert.equal((await send({ ...owner, traceId: '' })).status, 400);
+    assert.deepEqual(calls, []);
+    const result = await send(owner);
+    assert.equal(result.status, 200);
+    assert.deepEqual(await result.json(), { ok: true });
+    assert.deepEqual(calls, [[owner.traceId, owner.helperPid]]);
+  } finally { await server.close(); }
+});

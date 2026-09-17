@@ -58,6 +58,7 @@ interface SafeTurnControl {
   finalAnswer?: string;
   sentWaiters: Set<SafeWaiter<void>>;
   startWaiters: Set<SafeWaiter<void>>;
+  connectorWaiters: Set<SafeWaiter<void>>;
   completionWaiters: Set<SafeWaiter<string>>;
 }
 
@@ -104,6 +105,7 @@ interface BrokerRequest {
     | "owner_completion_fence_commit"
     | "owner_wait_retirement"
     | "owner_revoke"
+    | "owner_safe_wait_connector"
     | "owner_safe_wait_start"
     | "owner_safe_wait_completion"
     | "owner_request_compaction"
@@ -221,6 +223,7 @@ export interface TurnBrokerOwner {
   ): { confirmed: true; duplicate: boolean } | Promise<{ confirmed: true; duplicate: boolean }>;
   nextToolBatch(token: string, signal?: AbortSignal): Promise<BrokerToolRequest[]>;
   completeTool(token: string, callId: string, result: BrokerToolResult): void | Promise<void>;
+  waitForSafeConnectorStart(token: string, surfaceNonce: string, signal?: AbortSignal): Promise<void>;
   waitForSafeStart(token: string, signal?: AbortSignal): Promise<void>;
   waitForSafeCompletion(token: string, signal?: AbortSignal): Promise<string>;
   requestCompaction(token: string, queuedResult: BrokerToolResult): number | Promise<number>;
@@ -332,6 +335,7 @@ export class TurnBroker implements TurnBrokerOwner {
       connectorStarted: false,
       sentWaiters: new Set(),
       startWaiters: new Set(),
+      connectorWaiters: new Set(),
       completionWaiters: new Set(),
     };
     return token;
@@ -515,6 +519,7 @@ export class TurnBroker implements TurnBrokerOwner {
     }
     if (safe.connectorStarted) return { started: true, duplicate: true };
     safe.connectorStarted = true;
+    this.resolveSafeWaiters(safe.connectorWaiters, undefined);
     this.activateSafeTurn(channel, safe);
     return { started: true, duplicate: false };
   }
@@ -569,6 +574,17 @@ export class TurnBroker implements TurnBrokerOwner {
     return { completed: true, duplicate: false };
   }
 
+  // This observes the connector only. It must never authorize tools or replace local Sent.
+  waitForSafeConnectorStart(requestId: string, surfaceNonce: string, signal?: AbortSignal): Promise<void> {
+    this.prune();
+    const safe = this.channels.get(requestId)?.safe;
+    if (!safe) return Promise.reject(new Error("Zero Risk request is unavailable"));
+    this.assertSafeNonce(safe, surfaceNonce);
+    if (safe.state === "revoked") return Promise.reject(new Error("Zero Risk turn was revoked"));
+    if (safe.connectorStarted) return Promise.resolve();
+    return this.waitForSafeState(safe.connectorWaiters, signal, "Zero Risk connector observation aborted");
+  }
+
   waitForSafeStart(requestId: string, signal?: AbortSignal): Promise<void> {
     this.prune();
     const channel = this.channels.get(requestId);
@@ -615,6 +631,7 @@ export class TurnBroker implements TurnBrokerOwner {
       channel.safe.state = "revoked";
       this.rejectSafeWaiters(channel.safe.sentWaiters, reason);
       this.rejectSafeWaiters(channel.safe.startWaiters, reason);
+      this.rejectSafeWaiters(channel.safe.connectorWaiters, reason);
       this.rejectSafeWaiters(channel.safe.completionWaiters, reason);
     }
     this.retire(this.retiredTokens, token, channel.traceId);
@@ -877,7 +894,7 @@ export class TurnBroker implements TurnBrokerOwner {
     if (!request || typeof request !== "object" || typeof request.id !== "string" || request.id.length === 0 || request.id.length > 256) {
       throw new Error("turn broker request id is invalid");
     }
-    if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_register", "owner_register_safe", "owner_update", "owner_safe_sent", "owner_next", "owner_complete", "owner_completion_fence_begin", "owner_completion_fence_commit", "owner_wait_retirement", "owner_revoke", "owner_safe_wait_start", "owner_safe_wait_completion", "owner_request_compaction", "owner_compaction_delivery_count", "safe_start", "safe_complete", "activity_complete", "submit_compaction_handoff"].includes(request.method)) {
+    if (!["claim", "resolve", "release", "invoke", "owner_status", "owner_register", "owner_register_safe", "owner_update", "owner_safe_sent", "owner_next", "owner_complete", "owner_completion_fence_begin", "owner_completion_fence_commit", "owner_wait_retirement", "owner_revoke", "owner_safe_wait_connector", "owner_safe_wait_start", "owner_safe_wait_completion", "owner_request_compaction", "owner_compaction_delivery_count", "safe_start", "safe_complete", "activity_complete", "submit_compaction_handoff"].includes(request.method)) {
       throw new Error("turn broker method is invalid");
     }
   }
@@ -978,6 +995,12 @@ export class TurnBroker implements TurnBrokerOwner {
       if (!request.token) throw new Error("turn owner token is required");
       this.revoke(request.token);
       return { revoked: true };
+    }
+    if (request.method === "owner_safe_wait_connector") {
+      if (!request.token) throw new Error("turn owner token is required");
+      assertSurfaceNonce(request.surfaceNonce);
+      return this.waitForSafeConnectorStart(request.token, request.surfaceNonce, socketSignal)
+        .then(() => ({ started: true }));
     }
     if (request.method === "owner_safe_wait_start") {
       if (!request.token) throw new Error("turn owner token is required");
@@ -1393,6 +1416,13 @@ export class RemoteTurnBroker implements TurnBrokerOwner {
       callId,
       toolResult: result,
     }, null);
+  }
+
+  async waitForSafeConnectorStart(token: string, surfaceNonce: string, signal?: AbortSignal): Promise<void> {
+    const response = await callTurnBroker<{ started?: unknown }>(
+      this.socketPath, { method: "owner_safe_wait_connector", token, surfaceNonce }, null, signal,
+    );
+    if (response.started !== true) throw new Error("Zero Risk connector observation was invalid");
   }
 
   async waitForSafeStart(token: string, signal?: AbortSignal): Promise<void> {
