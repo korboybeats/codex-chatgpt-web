@@ -3537,3 +3537,29 @@ test('native blob is opened before request callback releases its temporary handl
   f.uploadResponse(); f.send(f.submission()); f.submissionResponse(); f.start();
   assert.equal(f.tab.manualState, 'sent');
 });
+
+for (const ackFirst of [false, true]) test(`server acknowledgement confirms Sent before connector start (${ackFirst})`, t => {
+  const f = autoSentFixture(t);
+  f.send();
+  const owned = f.tab.manualSubmission;
+  if (ackFirst) owned.serverAcknowledged = true;
+  f.listeners.onResponseStarted(f.response());
+  if (!ackFirst) {
+    assert.equal(f.tab.manualState, 'awaiting-user');
+    owned.serverAcknowledged = true;
+    f.fixture.tryConfirmManualSubmission(f.tab);
+  }
+  assert.equal(f.tab.manualState, 'sent');
+  f.start(); f.fixture.tryConfirmManualSubmission(f.tab);
+  assert.equal(f.logs.filter(([event]) => event === 'browser.manual_prompt_auto_confirmed').length, 1);
+});
+
+test('early server acknowledgement cannot bypass native submission failure', t => {
+  const f = autoSentFixture(t);
+  f.send(); f.tab.manualSubmission.serverAcknowledged = true;
+  f.listeners.onResponseStarted(f.response({ statusCode: 400 }));
+  f.fixture.tryConfirmManualSubmission(f.tab);
+  assert.equal(f.tab.manualState, 'awaiting-user');
+  f.fixture.confirmManualSent(f.tab.id);
+  assert.equal(f.tab.manualState, 'sent');
+});

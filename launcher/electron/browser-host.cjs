@@ -25,6 +25,7 @@ const {
 } = require("./browser-state.cjs");
 
 const { SUBMISSION_FILTER, OBSERVATION_FILTER, uploadedFileId, promptUpload, pastedPromptFile, matchesManualPrompt, successfulSubmissionResponse } = require("./manual-submission.cjs");
+const { observeSubmissionAck } = require("./manual-submission-ack.cjs");
 
 const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
@@ -915,6 +916,7 @@ class BrowserHost {
     contents.on("did-start-navigation", (_event, url, inPlace, mainFrame) => {
       if (!mainFrame) return;
       if (!inPlace) {
+        if (tab.manualSubmission) tab.manualAckObserver?.dispose();
         tab.manualSubmission = null;
         tab.manualConnectorStarted = false;
         tab.manualPromptUploads = null;
@@ -1242,6 +1244,7 @@ class BrowserHost {
     }
     tab.manualSubmission = {
       requestId: details.id, traceId: tab.traceId, helperPid: tab.helperPid,
+      requestDigest: createHash("sha256").update(Buffer.concat(details.uploadData.map(part => part.bytes))).digest("hex"),
       contentsId: contents.id, frame: details.frame, accepted: false, promptVerified, upload,
     };
     this.logger.info("browser.manual_submission_observed", { tabId: tab.id, traceId: tab.traceId });
@@ -1309,7 +1312,9 @@ class BrowserHost {
 
   tryConfirmManualSubmission(tab) {
     const evidence = tab.manualSubmission;
-    if (!this.manualAutoSentEligible(tab) || !tab.manualConnectorStarted || !evidence?.accepted || (!evidence.promptVerified && !evidence.upload?.promptVerified)
+    if (!this.manualAutoSentEligible(tab) || !evidence?.accepted
+      || (!tab.manualConnectorStarted && !evidence.serverAcknowledged)
+      || (!evidence.promptVerified && !evidence.upload?.promptVerified)
       || evidence.traceId !== tab.traceId || evidence.helperPid !== tab.helperPid
       || evidence.contentsId !== tab.view.webContents.id
       || evidence.frame !== tab.view.webContents.mainFrame) return;
@@ -1318,7 +1323,8 @@ class BrowserHost {
       || upload.traceId !== tab.traceId || upload.helperPid !== tab.helperPid
       || upload.contentsId !== evidence.contentsId || upload.frame !== evidence.frame)) return;
     this.confirmManualSent(tab.id);
-    this.logger.info("browser.manual_prompt_auto_confirmed", { tabId: tab.id, traceId: tab.traceId });
+    this.logger.info("browser.manual_prompt_auto_confirmed", { tabId: tab.id, traceId: tab.traceId,
+      signal: evidence.serverAcknowledged ? "server-handoff" : "connector-start" });
   }
 
   bindChatGptBackendRecovery() {
@@ -1713,6 +1719,8 @@ class BrowserHost {
       tab.manualSubmission = null;
       tab.manualConnectorStarted = false;
       tab.manualPromptUploads = null;
+      tab.manualAckObserver?.dispose();
+      tab.manualAckObserver = null;
       tab.prompt = null;
       tab.promptDigest = null;
       for (const resolve of tab.manualWaiters || []) resolve({ status: "cancelled" });
@@ -2067,6 +2075,8 @@ class BrowserHost {
     tab.manualSubmission = null;
     tab.manualConnectorStarted = false;
     tab.manualPromptUploads = null;
+    tab.manualAckObserver?.dispose();
+    tab.manualAckObserver = null;
     tab.prompt = null;
     tab.promptDigest = null;
     this.rememberManualTerminal(tab.traceId, tab.helperPid, status);
@@ -2225,6 +2235,19 @@ class BrowserHost {
     tab.manualSubmission = null;
     tab.manualConnectorStarted = false;
     tab.manualPromptUploads = null;
+    tab.manualAckObserver?.dispose();
+    tab.manualAckObserver = null;
+    if (tab.autoSentEnabled) {
+      tab.manualAckObserver = observeSubmissionAck(tab.view?.webContents, {
+        eligible: () => this.manualAutoSentEligible(tab),
+        evidence: () => tab.manualSubmission,
+        acknowledged: evidence => {
+          if (!this.manualAutoSentEligible(tab) || tab.manualSubmission !== evidence) return;
+          evidence.serverAcknowledged = true;
+          this.tryConfirmManualSubmission(tab);
+        },
+      });
+    }
     this.armManualTurnDeadline(tab);
     this.selectedTabId = tab.id;
     this.showWindow();
@@ -2325,6 +2348,8 @@ class BrowserHost {
     tab.manualSubmission = null;
     tab.manualConnectorStarted = false;
     tab.manualPromptUploads = null;
+    tab.manualAckObserver?.dispose();
+    tab.manualAckObserver = null;
     tab.prompt = null;
     tab.message = "Prompt sent; waiting for ChatGPT to start through the Codex harness";
     for (const resolve of tab.manualWaiters) resolve({ status: "sent", sentAt: tab.sentAt });
@@ -2375,6 +2400,8 @@ class BrowserHost {
       tab.manualSubmission = null;
       tab.manualConnectorStarted = false;
       tab.manualPromptUploads = null;
+      tab.manualAckObserver?.dispose();
+      tab.manualAckObserver = null;
       tab.prompt = null;
       tab.promptDigest = null;
       tab.manualState = "completed";
@@ -2394,6 +2421,8 @@ class BrowserHost {
       tab.manualSubmission = null;
       tab.manualConnectorStarted = false;
       tab.manualPromptUploads = null;
+      tab.manualAckObserver?.dispose();
+      tab.manualAckObserver = null;
       tab.prompt = null;
       tab.promptDigest = null;
       tab.manualState = "completed";
@@ -3140,6 +3169,8 @@ class BrowserHost {
     for (const tab of this.turnTabs.values()) {
       if (tab.interactionMode === "manual") {
         if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
+        tab.manualAckObserver?.dispose();
+        tab.manualAckObserver = null;
         tab.manualSubmission = null;
         tab.manualConnectorStarted = false;
         tab.manualPromptUploads = null;

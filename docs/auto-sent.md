@@ -23,9 +23,15 @@ Auto Sent requires all of these facts, in either event order:
    an uncached HTTP 200/201. Attachment metadata alone cannot confirm anything.
 2. `onResponseStarted` for that exact native request reports an uncached HTTP 200 event stream.
    This is transport evidence only; a successful HTTP status is insufficient on its own.
-3. The existing broker receives `codex_turn_start` for that turn's opaque request ID. A new observer,
-   authenticated by the existing private surface nonce, forwards that fact through the authenticated
-   launcher control channel. Observation does not activate the broker or authorize tools.
+3. The server acknowledges that exact request with a `resume_conversation_token` followed by a
+   `stream_handoff`, with the same conversation ID and a nonempty turn-exchange ID. A short-lived,
+   read-only Electron debugger Network observer matches the entire request-body SHA-256 to the
+   native request and checks the root frame before reading at most 64 KiB of the initial response.
+   It detaches as soon as acknowledgement is established; token and response content are discarded.
+   This confirms Sent without waiting for the model to invoke the connector. If this protocol is
+   unavailable, the existing nonce-authenticated `codex_turn_start` observer remains a fallback.
+   Neither path activates the broker or authorizes tools: the broker still requires its separate
+   connector start after Sent.
 4. At confirmation, the same tab, trace, helper PID, live helper, main frame and unexpired
    `awaiting-user` state still own the evidence. Confirmation calls the existing `confirmManualSent`.
    The normal adapter then confirms Sent using its private nonce, and existing start, tool,
@@ -35,8 +41,15 @@ Electron's native request ID is distinct from the broker request ID. Exact match
 prepared text also matches the embedded broker request ID. Retained tabs use the selected incremental
 prompt digest and a fresh trace; previous evidence is cleared before reuse.
 
-There is no DOM observer, preload on ChatGPT, CDP connection, synthetic input, model selection,
-request modification, response-body interception, or polling. The request callback always passes an
+There is no DOM observer, preload on ChatGPT, synthetic input, model selection, request modification,
+Fetch interception, or polling. The early acknowledgement observer uses only native debugger
+`Network.enable`, `Page.getFrameTree`, and `Network.streamResourceContent`. It never takes ownership
+of an already-attached debugger; unavailable/detached observation uses the original fallback.
+The observer clears on Sent, terminal state, reuse, removal, setting changes and shutdown. Native
+navigation invalidates submission evidence; every asynchronous result rechecks that same evidence
+object and main frame. Only the exact matched response body is opened, and no response content or
+headers are logged. Network event metadata and request post data arrive transiently through the
+native debugger, but only matching request digests and bounded acknowledgement state are retained. The request callback always passes an
 empty response object to Electron, including on detection failure. Only known submission URLs are
 observed, plus PUTs to `files.oaiusercontent.com` or OpenAI's regional
 `sdmntpr<region>.oaiusercontent.com` storage hosts over HTTPS. Other upload origins are rejected.
@@ -57,7 +70,8 @@ request bodies or headers. Logs contain event names, local tab/trace IDs and fix
   evidence. Only an actual outgoing exact message can become a candidate.
 - Different text, another tab/frame, a previous prompt, regeneration, unsupported payloads,
   redirects, HTTP failures, cached responses and network errors cannot confirm the turn.
-- HTTP 200 containing an application error does not trigger confirmation without connector start.
+- HTTP 200 containing an application error does not trigger the early path. It requires the explicit
+  server handoff, not status alone. A later model/connector failure does not undo a real submission.
 - An upload still in progress supplies no submission evidence. After ChatGPT submits the message
   with uploaded image references, the same exact-text and connector checks apply. The detector
   does not inspect or validate the user's chosen images or infer intended attachment completeness.
@@ -71,22 +85,24 @@ request bodies or headers. Logs contain event names, local tab/trace IDs and fix
 - Duplicate events and manual/automatic confirmation races use the existing idempotent Sent path.
   Auto Sent rechecks the deadline synchronously, including when a timeout callback is delayed.
 - Changing the setting disarms current turns; enabling applies only to subsequently prepared turns.
-- Missing detection or observer errors leave manual Sent usable. No timer is extended. Slow model
-  reasoning can delay connector start beyond the human handoff deadline: press Sent manually after
-  submitting in that case. This feature does not promise immediate confirmation.
+- Missing detection or observer errors leave manual Sent usable. No timer is extended. The early
+  server handoff avoids waiting for model reasoning; network latency still applies. If that early
+  signal is unavailable, slow connector startup can delay the fallback beyond the human handoff
+  deadline, so manual Sent remains available. No fixed latency is guaranteed.
 
 ## Why this signal
 
 Native navigation and input events cannot identify an accepted message. A DOM bubble may be an
 optimistic render or remounted history. HTTP success can carry an application error. Connector start
 alone identifies a request but not its originating tab or exact text. Combining narrow native
-submission evidence with the existing connector event avoids all four ambiguities without operating
-the page. ChatGPT's private submission protocol can change; unknown formats fail closed.
+submission evidence with an explicit server stream handoff (or the existing connector event)
+avoids all four ambiguities without operating the page. ChatGPT's private submission protocol can change; unknown formats fail closed.
 
 Electron supports only one listener per WebRequest event. The new hooks are installed once by the
 BrowserHost. The existing automatic-mode `onCompleted` recovery hook is preserved.
 
-References: [Electron WebRequest](https://www.electronjs.org/docs/latest/api/web-request),
+References: [Electron debugger](https://www.electronjs.org/docs/latest/api/debugger),
+[Electron WebRequest](https://www.electronjs.org/docs/latest/api/web-request),
 [Electron session blobs](https://www.electronjs.org/docs/latest/api/session#sesgetblobdataidentifier),
 [retained navigation issue #377](https://github.com/miuuyy/codex-chatgpt-web/issues/377),
 [post-Sent timeout issue #325](https://github.com/miuuyy/codex-chatgpt-web/issues/325),
@@ -101,6 +117,6 @@ are simulated. These tests do not establish that a live account uses a supported
 
 For account validation, enable the setting before starting a fresh Zero Risk turn. Paste the prompt
 and verify the launcher still offers Sent. Select the connector and desired model yourself, then send
-in ChatGPT. A matching connector start should produce `browser.manual_prompt_auto_confirmed` exactly
-once, followed by normal completion. Repeat with manual Sent, an edited prompt, and retained and
+in ChatGPT. The server handoff should produce `browser.manual_prompt_auto_confirmed` exactly once,
+before connector start, followed by normal completion. Unsupported handoffs use connector fallback. Repeat with manual Sent, an edited prompt, and retained and
 compaction turns. Never use automation to submit the live ChatGPT prompt for this test.

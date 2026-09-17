@@ -911,6 +911,8 @@ function registerIpc({ logger, stateStore }) {
         tab.manualSubmission = null;
         tab.manualConnectorStarted = false;
         tab.manualPromptUploads = null;
+        tab.manualAckObserver?.dispose();
+        tab.manualAckObserver = null;
       }
     }
     return stateStore.update({ [key]: value === true });
