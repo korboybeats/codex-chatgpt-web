@@ -24,9 +24,10 @@ function promptUpload(details) {
     || !Array.isArray(details.uploadData) || details.uploadData.length !== 1) return null;
   const fileId = uploadedFileId(details.url);
   if (!fileId) return null;
+  // Electron supplies an opaque blob handle; its spelling is not proof of identity.
   const part = details.uploadData[0];
   if (part.file || typeof part.blobUUID !== "string"
-    || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(part.blobUUID)) return null;
+    || part.blobUUID.length === 0) return null;
   return { fileId, blobUUID: part.blobUUID };
 }
 

@@ -76,7 +76,8 @@ test('upload identity accepts only an unambiguous native file UUID on the upload
   }
   const req = { url: base, method: 'PUT', resourceType: 'xhr', uploadData: [{ blobUUID: '11111111-2222-3333-4444-555555555555' }] };
   assert.ok(promptUpload(req));
-  for (const extra of [{ method: 'POST' }, { resourceType: 'other' }, { uploadData: [{ file: '/private/file' }] }, { uploadData: [{ blobUUID: 'bad' }] }]) {
+  assert.ok(promptUpload({ ...req, uploadData: [{ blobUUID: "opaque-native-blob-handle" }] }));
+  for (const extra of [{ method: 'POST' }, { resourceType: 'other' }, { uploadData: [{ file: '/private/file' }] }, { uploadData: [{ blobUUID: '' }] }, { uploadData: [{ blobUUID: 42 }] }]) {
     assert.equal(promptUpload({ ...req, ...extra }), null);
   }
 });
