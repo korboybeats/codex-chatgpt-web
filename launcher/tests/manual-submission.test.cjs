@@ -61,3 +61,29 @@ test('unknown response headers never establish acceptance', () => {
     assert.equal(successfulSubmissionResponse({ statusCode: 200, fromCache: false, responseHeaders: { 'content-type': value } }), false);
   }
 });
+
+const { uploadedFileId, promptUpload, pastedPromptFile } = require('../electron/manual-submission.cjs');
+test('upload identity accepts only an unambiguous native file UUID on the upload origin', () => {
+  const base = 'https://files.oaiusercontent.com/00000000-1234-5678-9abc-def012345678/raw';
+  assert.equal(uploadedFileId(base + '?private=ignored'), 'file_00000000123456789abcdef012345678');
+  for (const url of ['invalid', base.replace('https:', 'http:'), base.replace('files.oaiusercontent.com', 'evil.test'),
+    base.replace('/raw', '/ffffffff-1234-5678-9abc-def012345678'), base.replace('/raw', 'extra/raw')]) {
+    assert.equal(uploadedFileId(url), null);
+  }
+  const req = { url: base, method: 'PUT', resourceType: 'xhr', uploadData: [{ blobUUID: '11111111-2222-3333-4444-555555555555' }] };
+  assert.ok(promptUpload(req));
+  for (const extra of [{ method: 'POST' }, { resourceType: 'other' }, { uploadData: [{ file: '/private/file' }] }, { uploadData: [{ blobUUID: 'bad' }] }]) {
+    assert.equal(promptUpload({ ...req, ...extra }), null);
+  }
+});
+
+test('pasted attachment metadata never substitutes for exact byte verification', () => {
+  const value = body(); value.messages[0].content.parts = ['@Codex Zero Risk '];
+  const file = { id: 'file_00000000123456789abcdef012345678', size: 42, mime_type: 'text/plain', is_big_paste: true };
+  value.messages[0].metadata = { attachments: [file] };
+  assert.equal(pastedPromptFile(request(value), 42), file.id);
+  assert.equal(matchesManualPrompt(request(value), digest), false);
+  assert.equal(pastedPromptFile(request(value), 43), null);
+  value.messages[0].metadata.attachments.push({ ...file, is_big_paste: false });
+  assert.equal(pastedPromptFile(request(value), 42), null);
+});

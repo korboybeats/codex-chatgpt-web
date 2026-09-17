@@ -14,6 +14,12 @@ Auto Sent requires all of these facts, in either event order:
    prepared prompt digest. ChatGPT's exact leading `@Codex Zero Risk ` connector-chip prefix is
    allowed; the remaining prompt must match without trimming or other normalization. Multimodal
    messages may also contain uploaded image references.
+   For ChatGPT's large-paste text-file format, the message must instead reference exactly one
+   `is_big_paste` text attachment with the expected UTF-8 byte count, with no other message text
+   except the connector mention. Its file ID must match a native upload observed in this same turn.
+   Only then does Electron's native `session.getBlobData` read that upload's blob in memory. Both
+   its actual byte count and SHA-256 must match the prepared prompt. The upload must also receive
+   an uncached HTTP 200/201. Attachment metadata alone cannot confirm anything.
 2. `onResponseStarted` for that exact native request reports an uncached HTTP 200 event stream.
    This is transport evidence only; a successful HTTP status is insufficient on its own.
 3. The existing broker receives `codex_turn_start` for that turn's opaque request ID. A new observer,
@@ -31,9 +37,13 @@ prompt digest and a fresh trace; previous evidence is cleared before reuse.
 There is no DOM observer, preload on ChatGPT, CDP connection, synthetic input, model selection,
 request modification, response-body interception, or polling. The request callback always passes an
 empty response object to Electron, including on detection failure. Only known submission URLs are
-observed. Parsing is bounded to 8 MiB, in memory; no file-backed uploads are opened. Stored evidence
-contains native identity and acceptance metadata, not request bodies, headers, prompt text or
-attachment identifiers. Logs contain event names and local tab/trace IDs only.
+observed, plus PUTs to the exact `files.oaiusercontent.com` origin. JSON parsing is bounded to 8 MiB;
+no disk-backed upload files are opened. At most four upload candidates are retained per turn.
+The blob API returns a whole buffer: it is called only for a submitted big-paste attachment whose
+declared size equals the bounded prepared prompt, and its returned length is checked again. No
+upload contents are read merely because they were pasted, selected or uploaded. Stored evidence
+contains native identity, opaque upload identifiers and acceptance metadata, never uploaded bytes,
+request bodies or headers. Logs contain event names, local tab/trace IDs and fixed failure reasons.
 
 ## Failure behavior
 
@@ -45,6 +55,10 @@ attachment identifiers. Logs contain event names and local tab/trace IDs only.
 - An upload still in progress supplies no submission evidence. After ChatGPT submits the message
   with uploaded image references, the same exact-text and connector checks apply. The detector
   does not inspect or validate the user's chosen images or infer intended attachment completeness.
+- Upload URLs encode the file ID as one complete UUID path segment; attachment metadata uses the
+  same 32 hexadecimal digits prefixed by `file_`. Ambiguous paths, unknown IDs, failed uploads,
+  unavailable blobs, replaced files and edited pasted text fail closed. No filename, timestamp or
+  sequence-only correlation is used. Async blob results recheck the same live turn and submission.
 - Main-document navigation clears evidence. Existing retained-conversation navigation rules remain
   authoritative. Renderer failure, cancellation, timeout, completion and tab removal clear evidence.
   Launcher/browser restart never restores evidence from disk.
@@ -67,6 +81,7 @@ Electron supports only one listener per WebRequest event. The new hooks are inst
 BrowserHost. The existing automatic-mode `onCompleted` recovery hook is preserved.
 
 References: [Electron WebRequest](https://www.electronjs.org/docs/latest/api/web-request),
+[Electron session blobs](https://www.electronjs.org/docs/latest/api/session#sesgetblobdataidentifier),
 [retained navigation issue #377](https://github.com/miuuyy/codex-chatgpt-web/issues/377),
 [post-Sent timeout issue #325](https://github.com/miuuyy/codex-chatgpt-web/issues/325),
 [compaction ownership issue #318](https://github.com/miuuyy/codex-chatgpt-web/issues/318).

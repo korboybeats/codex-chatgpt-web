@@ -24,7 +24,7 @@ const {
   shellZoomActionForInput,
 } = require("./browser-state.cjs");
 
-const { SUBMISSION_FILTER, matchesManualPrompt, successfulSubmissionResponse } = require("./manual-submission.cjs");
+const { SUBMISSION_FILTER, OBSERVATION_FILTER, uploadedFileId, promptUpload, pastedPromptFile, matchesManualPrompt, successfulSubmissionResponse } = require("./manual-submission.cjs");
 
 const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
@@ -917,6 +917,7 @@ class BrowserHost {
       if (!inPlace) {
         tab.manualSubmission = null;
         tab.manualConnectorStarted = false;
+        tab.manualPromptUploads = null;
       }
       invalidateConversation(url, inPlace);
       tab.url = url;
@@ -1178,22 +1179,25 @@ class BrowserHost {
   // The existing automatic-mode recovery onCompleted hook remains untouched.
   bindManualSubmissionObserver() {
     const requests = this.view.webContents.session.webRequest;
-    requests.onBeforeRequest(SUBMISSION_FILTER, (details, callback) => {
+    requests.onBeforeRequest(OBSERVATION_FILTER, (details, callback) => {
       try { this.observeManualSubmission(details); }
       catch { /* Detection must never interrupt a browser request or manual Sent. */ }
       finally { callback({}); }
     });
-    requests.onResponseStarted(SUBMISSION_FILTER, details => {
+    requests.onResponseStarted(OBSERVATION_FILTER, details => {
       try { this.observeManualSubmissionResponse(details); }
       catch { /* Optional observation cannot disrupt the browser lifecycle. */ }
     });
     const discard = details => {
       for (const tab of this.turnTabs.values()) {
         if (tab.manualSubmission?.requestId === details.id) tab.manualSubmission = null;
+        const upload = tab.manualPromptUploads?.get(details.id);
+        if (upload && tab.manualSubmission?.upload === upload) tab.manualSubmission = null;
+        tab.manualPromptUploads?.delete(details.id);
       }
     };
-    requests.onBeforeRedirect(SUBMISSION_FILTER, discard);
-    requests.onErrorOccurred(SUBMISSION_FILTER, discard);
+    requests.onBeforeRedirect(OBSERVATION_FILTER, discard);
+    requests.onErrorOccurred(OBSERVATION_FILTER, discard);
   }
 
   manualAutoSentEligible(tab) {
@@ -1210,17 +1214,71 @@ class BrowserHost {
     const contents = tab.view.webContents;
     if (!details.frame || details.frame !== contents.mainFrame
       || new URL(details.frame.url).origin !== CHATGPT_ORIGIN) return;
+    if (!SUBMISSION_FILTER.urls.includes(details.url)) {
+      const data = promptUpload(details);
+      if (!data) return;
+      const uploads = tab.manualPromptUploads ||= new Map();
+      for (const [id, upload] of uploads) {
+        if (upload.fileId === data.fileId || uploads.size >= 4) uploads.delete(id);
+      }
+      uploads.set(details.id, { ...data, requestId: details.id, contentsId: contents.id,
+        frame: details.frame, traceId: tab.traceId, helperPid: tab.helperPid, accepted: false });
+      return;
+    }
     // Any later request supersedes the earlier candidate, including unrelated text or regeneration.
     tab.manualSubmission = null;
-    if (!matchesManualPrompt(details, tab.promptDigest)) return;
-    tab.manualSubmission = {
+    const promptVerified = matchesManualPrompt(details, tab.promptDigest);
+    const expectedBytes = typeof tab.prompt === "string" ? Buffer.byteLength(tab.prompt) : 0;
+    const fileId = promptVerified ? null : pastedPromptFile(details, expectedBytes);
+    const upload = fileId && [...(tab.manualPromptUploads?.values() || [])]
+      .find(candidate => candidate.fileId === fileId);
+    if (!promptVerified && !upload) {
+      this.logger.info("browser.manual_submission_unverified", { tabId: tab.id, traceId: tab.traceId,
+        reason: fileId ? "upload-not-observed" : "prompt-not-matched" });
+      return;
+    }
+    const evidence = tab.manualSubmission = {
       requestId: details.id, traceId: tab.traceId, helperPid: tab.helperPid,
-      contentsId: contents.id, frame: details.frame, accepted: false,
+      contentsId: contents.id, frame: details.frame, accepted: false, promptVerified, upload,
     };
     this.logger.info("browser.manual_submission_observed", { tabId: tab.id, traceId: tab.traceId });
+    if (upload) void this.verifyManualPromptBlob(tab, evidence, expectedBytes, tab.promptDigest);
+  }
+
+  async verifyManualPromptBlob(tab, evidence, expectedBytes, digest) {
+    try {
+      const bytes = await tab.view.webContents.session.getBlobData(evidence.upload.blobUUID);
+      if (!this.manualAutoSentEligible(tab) || tab.manualSubmission !== evidence) return;
+      if (!Buffer.isBuffer(bytes) || bytes.length !== expectedBytes
+        || createHash("sha256").update(bytes).digest("hex") !== digest) {
+        tab.manualSubmission = null;
+        this.logger.info("browser.manual_submission_unverified", { tabId: tab.id, traceId: tab.traceId, reason: "prompt-not-matched" });
+        return;
+      }
+      evidence.promptVerified = true;
+      this.tryConfirmManualSubmission(tab);
+    } catch {
+      if (tab.manualSubmission === evidence) {
+        tab.manualSubmission = null;
+        this.logger.info("browser.manual_submission_unverified", { tabId: tab.id, traceId: tab.traceId, reason: "blob-unavailable" });
+      }
+    }
   }
 
   observeManualSubmissionResponse(details) {
+    if (!SUBMISSION_FILTER.urls.includes(details.url)) {
+      const owner = [...this.turnTabs.values()].find(tab => tab.manualPromptUploads?.has(details.id));
+      if (!this.manualAutoSentEligible(owner)) return;
+      const upload = owner.manualPromptUploads.get(details.id);
+      if (details.webContentsId !== upload.contentsId || uploadedFileId(details.url) !== upload.fileId || details.fromCache !== false
+        || ![200, 201].includes(details.statusCode)) {
+        owner.manualPromptUploads.delete(details.id);
+        return;
+      }
+      upload.accepted = true;
+      this.tryConfirmManualSubmission(owner);
+      return;
+    }
     const tab = [...this.turnTabs.values()].find(candidate => candidate.manualSubmission?.requestId === details.id);
     if (!this.manualAutoSentEligible(tab)) return;
     const evidence = tab.manualSubmission;
@@ -1242,10 +1300,14 @@ class BrowserHost {
 
   tryConfirmManualSubmission(tab) {
     const evidence = tab.manualSubmission;
-    if (!this.manualAutoSentEligible(tab) || !tab.manualConnectorStarted || !evidence?.accepted
+    if (!this.manualAutoSentEligible(tab) || !tab.manualConnectorStarted || !evidence?.accepted || !evidence.promptVerified
       || evidence.traceId !== tab.traceId || evidence.helperPid !== tab.helperPid
       || evidence.contentsId !== tab.view.webContents.id
       || evidence.frame !== tab.view.webContents.mainFrame) return;
+    const upload = evidence.upload;
+    if (upload && (!upload.accepted || tab.manualPromptUploads?.get(upload.requestId) !== upload
+      || upload.traceId !== tab.traceId || upload.helperPid !== tab.helperPid
+      || upload.contentsId !== evidence.contentsId || upload.frame !== evidence.frame)) return;
     this.confirmManualSent(tab.id);
     this.logger.info("browser.manual_prompt_auto_confirmed", { tabId: tab.id, traceId: tab.traceId });
   }
@@ -1641,6 +1703,7 @@ class BrowserHost {
       tab.manualDeadlineAt = null;
       tab.manualSubmission = null;
       tab.manualConnectorStarted = false;
+      tab.manualPromptUploads = null;
       tab.prompt = null;
       tab.promptDigest = null;
       for (const resolve of tab.manualWaiters || []) resolve({ status: "cancelled" });
@@ -1994,6 +2057,7 @@ class BrowserHost {
     tab.lastHeartbeatAt = Date.now();
     tab.manualSubmission = null;
     tab.manualConnectorStarted = false;
+    tab.manualPromptUploads = null;
     tab.prompt = null;
     tab.promptDigest = null;
     this.rememberManualTerminal(tab.traceId, tab.helperPid, status);
@@ -2151,6 +2215,7 @@ class BrowserHost {
     tab.autoSentEnabled = this.getAutoSentEnabled?.() === true;
     tab.manualSubmission = null;
     tab.manualConnectorStarted = false;
+    tab.manualPromptUploads = null;
     this.armManualTurnDeadline(tab);
     this.selectedTabId = tab.id;
     this.showWindow();
@@ -2250,6 +2315,7 @@ class BrowserHost {
     tab.sentAt = new Date().toISOString();
     tab.manualSubmission = null;
     tab.manualConnectorStarted = false;
+    tab.manualPromptUploads = null;
     tab.prompt = null;
     tab.message = "Prompt sent; waiting for ChatGPT to start through the Codex harness";
     for (const resolve of tab.manualWaiters) resolve({ status: "sent", sentAt: tab.sentAt });
@@ -2299,6 +2365,7 @@ class BrowserHost {
       tab.manualDeadlineAt = null;
       tab.manualSubmission = null;
       tab.manualConnectorStarted = false;
+      tab.manualPromptUploads = null;
       tab.prompt = null;
       tab.promptDigest = null;
       tab.manualState = "completed";
@@ -2317,6 +2384,7 @@ class BrowserHost {
       tab.manualDeadlineAt = null;
       tab.manualSubmission = null;
       tab.manualConnectorStarted = false;
+      tab.manualPromptUploads = null;
       tab.prompt = null;
       tab.promptDigest = null;
       tab.manualState = "completed";
@@ -3065,6 +3133,7 @@ class BrowserHost {
         if (tab.manualDeadlineTimer) clearTimeout(tab.manualDeadlineTimer);
         tab.manualSubmission = null;
         tab.manualConnectorStarted = false;
+        tab.manualPromptUploads = null;
         tab.prompt = null;
         tab.promptDigest = null;
         for (const resolve of tab.manualWaiters || []) resolve({ status: "cancelled" });

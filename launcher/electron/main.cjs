@@ -910,6 +910,7 @@ function registerIpc({ logger, stateStore }) {
         tab.autoSentEnabled = false;
         tab.manualSubmission = null;
         tab.manualConnectorStarted = false;
+        tab.manualPromptUploads = null;
       }
     }
     return stateStore.update({ [key]: value === true });

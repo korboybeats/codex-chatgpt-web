@@ -3432,3 +3432,78 @@ test('navigation clears pending evidence, and observer failure leaves the reques
   assert.equal(f.tab.manualState, 'sent');
   assert.ok(!JSON.stringify(f.logs).includes('private parser error'));
 });
+
+function pastedFileFixture(t) {
+  const f = autoSentFixture(t);
+  const fileId = 'file_00000000123456789abcdef012345678';
+  const blobUUID = '11111111-2222-3333-4444-555555555555';
+  const upload = f.request('', { id: 20, method: 'PUT',
+    url: 'https://files.oaiusercontent.com/00000000-1234-5678-9abc-def012345678/raw?private=never-log',
+    uploadData: [{ blobUUID }] });
+  const value = f.body('@Codex Zero Risk ');
+  value.messages[0].metadata = { attachments: [{ id: fileId, size: Buffer.byteLength(f.prompt), mime_type: 'text/plain', is_big_paste: true }] };
+  const submission = () => f.request('', { id: 21, uploadData: [{ bytes: Buffer.from(JSON.stringify(value)) }] });
+  let resolveBlob, rejectBlob, reads = 0;
+  f.contents.session = { getBlobData(id) {
+    reads++; assert.equal(id, blobUUID);
+    return new Promise((resolve, reject) => { resolveBlob = resolve; rejectBlob = reject; });
+  } };
+  return { ...f, fileId, upload, value, submission, reads: () => reads,
+    resolveBlob: (bytes = Buffer.from(f.prompt)) => resolveBlob(bytes),
+    rejectBlob: () => rejectBlob(new Error('PRIVATE_BLOB_ERROR')),
+    uploadResponse: overrides => f.listeners.onResponseStarted({ ...upload, statusCode: 201, fromCache: false, ...overrides }),
+    submissionResponse: () => f.listeners.onResponseStarted(f.response({ id: 21 })),
+  };
+}
+
+for (const uploadFirst of [false, true]) test(`large paste requires exact native blob, accepted upload, submission and connector (${uploadFirst})`, async t => {
+  const f = pastedFileFixture(t);
+  f.send(f.upload);
+  assert.equal(f.reads(), 0); // Uploading/pasting alone never reads a blob or confirms Sent.
+  if (uploadFirst) f.uploadResponse();
+  f.send(f.submission());
+  assert.equal(f.reads(), 1);
+  f.submissionResponse(); f.start();
+  assert.equal(f.tab.manualState, 'awaiting-user');
+  f.resolveBlob(); await Promise.resolve();
+  if (!uploadFirst) {
+    assert.equal(f.tab.manualState, 'awaiting-user');
+    f.uploadResponse();
+  }
+  assert.equal(f.tab.manualState, 'sent');
+  f.uploadResponse(); f.submissionResponse(); f.start();
+  assert.equal(f.logs.filter(([event]) => event === 'browser.manual_prompt_auto_confirmed').length, 1);
+  assert.equal(f.tab.manualPromptUploads, null);
+  const log = JSON.stringify(f.logs);
+  for (const secret of [f.prompt, f.fileId, 'private=never-log', '11111111-2222', 'PRIVATE_BLOB_ERROR']) assert.ok(!log.includes(secret));
+});
+
+for (const scenario of ['wrong-text', 'wrong-id', 'wrong-size', 'not-big-paste', 'two-pastes', 'other-tab-upload', 'cached-upload', 'upload-error', 'redirect', 'blob-error', 'changed-blob', 'stale-trace', 'new-frame', 'manual-race', 'deadline-race', 'setting-change', 'superseded-send']) {
+  test(`large paste fails closed: ${scenario}`, async t => {
+    const f = pastedFileFixture(t);
+    const file = f.value.messages[0].metadata.attachments[0];
+    if (scenario === 'wrong-text') f.value.messages[0].content.parts = ['unrelated message'];
+    if (scenario === 'wrong-id') file.id = 'file_ffffffff123456789abcdef012345678';
+    if (scenario === 'wrong-size') file.size++;
+    if (scenario === 'not-big-paste') file.is_big_paste = false;
+    if (scenario === 'two-pastes') f.value.messages[0].metadata.attachments.push(file);
+    f.send(scenario === 'other-tab-upload' ? { ...f.upload, webContentsId: 999 } : f.upload);
+    f.uploadResponse(scenario === 'cached-upload' ? { fromCache: true } : scenario === 'upload-error' ? { statusCode: 500 } : {});
+    if (scenario === 'redirect') f.listeners.onBeforeRedirect(f.upload);
+    f.send(f.submission()); f.submissionResponse(); f.start();
+    if (f.reads()) {
+      if (scenario === 'stale-trace') f.tab.traceId = 'new-trace';
+      if (scenario === 'new-frame') f.contents.mainFrame = { url: 'https://chatgpt.com/' };
+      if (scenario === 'manual-race') f.fixture.confirmManualSent(f.tab.id);
+      if (scenario === 'deadline-race') f.tab.manualDeadlineAt = Date.now() - 1;
+      if (scenario === 'setting-change') f.tab.autoSentEnabled = false;
+      if (scenario === 'superseded-send') f.send(f.request('unrelated replacement', { id: 22 }));
+      if (scenario === 'blob-error') f.rejectBlob();
+      else f.resolveBlob(scenario === 'changed-blob' ? Buffer.alloc(Buffer.byteLength(f.prompt)) : Buffer.from(f.prompt));
+      await Promise.resolve();
+    }
+    assert.equal(f.logs.filter(([event]) => event === 'browser.manual_prompt_auto_confirmed').length, 0);
+    assert.equal(f.tab.manualState, scenario === 'manual-race' ? 'sent' : 'awaiting-user');
+    assert.ok(!JSON.stringify(f.logs).includes('PRIVATE_BLOB_ERROR'));
+  });
+}
