@@ -37,7 +37,9 @@ prompt digest and a fresh trace; previous evidence is cleared before reuse.
 There is no DOM observer, preload on ChatGPT, CDP connection, synthetic input, model selection,
 request modification, response-body interception, or polling. The request callback always passes an
 empty response object to Electron, including on detection failure. Only known submission URLs are
-observed, plus PUTs to the exact `files.oaiusercontent.com` origin. JSON parsing is bounded to 8 MiB;
+observed, plus PUTs to `files.oaiusercontent.com` or OpenAI's regional
+`sdmntpr<region>.oaiusercontent.com` storage hosts over HTTPS. Other upload origins are rejected.
+JSON parsing is bounded to 8 MiB;
 no disk-backed upload files are opened. At most four upload candidates are retained per turn.
 The blob API returns a whole buffer: it is called only for a submitted big-paste attachment whose
 declared size equals the bounded prepared prompt, and its returned length is checked again. No

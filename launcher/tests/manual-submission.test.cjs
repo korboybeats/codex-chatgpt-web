@@ -66,7 +66,11 @@ const { uploadedFileId, promptUpload, pastedPromptFile } = require('../electron/
 test('upload identity accepts only an unambiguous native file UUID on the upload origin', () => {
   const base = 'https://files.oaiusercontent.com/00000000-1234-5678-9abc-def012345678/raw';
   assert.equal(uploadedFileId(base + '?private=ignored'), 'file_00000000123456789abcdef012345678');
+  assert.equal(uploadedFileId(base.replace('files.oaiusercontent.com', 'sdmntprjapaneast.oaiusercontent.com')), 'file_00000000123456789abcdef012345678');
   for (const url of ['invalid', base.replace('https:', 'http:'), base.replace('files.oaiusercontent.com', 'evil.test'),
+    base.replace('files.oaiusercontent.com', 'other.oaiusercontent.com'),
+    base.replace('files.oaiusercontent.com', 'sdmntprjapaneast.oaiusercontent.com.evil.test'),
+    base.replace('files.oaiusercontent.com', 'files.oaiusercontent.com:444'),
     base.replace('/raw', '/ffffffff-1234-5678-9abc-def012345678'), base.replace('/raw', 'extra/raw')]) {
     assert.equal(uploadedFileId(url), null);
   }

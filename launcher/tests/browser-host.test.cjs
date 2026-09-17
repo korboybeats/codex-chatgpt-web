@@ -3438,7 +3438,7 @@ function pastedFileFixture(t) {
   const fileId = 'file_00000000123456789abcdef012345678';
   const blobUUID = '11111111-2222-3333-4444-555555555555';
   const upload = f.request('', { id: 20, method: 'PUT',
-    url: 'https://files.oaiusercontent.com/00000000-1234-5678-9abc-def012345678/raw?private=never-log',
+    url: 'https://sdmntprjapaneast.oaiusercontent.com/private/00000000-1234-5678-9abc-def012345678/raw?private=never-log',
     uploadData: [{ blobUUID }] });
   const value = f.body('@Codex Zero Risk ');
   value.messages[0].metadata = { attachments: [{ id: fileId, size: Buffer.byteLength(f.prompt), mime_type: 'text/plain', is_big_paste: true }] };

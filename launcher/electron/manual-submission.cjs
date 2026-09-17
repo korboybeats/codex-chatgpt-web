@@ -4,7 +4,7 @@ const SUBMISSION_FILTER = {
   urls: ["https://chatgpt.com/backend-api/conversation", "https://chatgpt.com/backend-api/f/conversation"],
 };
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
-const OBSERVATION_FILTER = { urls: [...SUBMISSION_FILTER.urls, "https://files.oaiusercontent.com/*"] };
+const OBSERVATION_FILTER = { urls: [...SUBMISSION_FILTER.urls, "https://*.oaiusercontent.com/*"] };
 const UUID_SEGMENT = /^(?:file[-_])?([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|[a-f0-9]{32})$/;
 
 // This is the storage representation of the same file_<32 hex> attachment ID.
@@ -12,7 +12,8 @@ const UUID_SEGMENT = /^(?:file[-_])?([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9
 function uploadedFileId(value) {
   let url;
   try { url = new URL(value); } catch { return null; }
-  if (url.origin !== "https://files.oaiusercontent.com") return null;
+  if (url.protocol !== "https:" || url.port || url.username || url.password
+    || !(url.hostname === "files.oaiusercontent.com" || /^sdmntpr[a-z0-9]+\.oaiusercontent\.com$/.test(url.hostname))) return null;
   const ids = url.pathname.split("/").map(part => part.match(UUID_SEGMENT)).filter(Boolean);
   if (ids.length !== 1) return null;
   return `file_${ids[0][1].replaceAll("-", "")}`;
